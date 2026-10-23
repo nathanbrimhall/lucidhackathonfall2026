@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { mediaPreferencesSchema, mediaTokenSchema, playerInputSchema, playerStatusSchema } from "../../shared/src/validation.js";
+import { mediaPreferencesSchema, mediaTokenSchema, mediaTransitionAckSchema, playerInputSchema, playerStatusSchema } from "../../shared/src/validation.js";
 
 describe("runtime movement and status validation", () => {
   it("accepts bounded finite direction intent and a safe nonnegative sequence", () => {
@@ -38,7 +38,17 @@ describe("media request validation", () => {
       { sessionId: "seat-session", mediaIdentity: "forged-identity" },
       { sessionId: "" },
       { sessionId: "x".repeat(129) },
+      { sessionId: "seat-session", transitionRevision: -1 },
+      { sessionId: "seat-session", transitionRevision: 1.5 },
+      { sessionId: "seat-session", transitionRevision: "1" },
     ]) expect(mediaTokenSchema.safeParse(payload).success).toBe(false);
+    expect(mediaTokenSchema.safeParse({ sessionId: "seat-session", transitionRevision: 0 }).success).toBe(true);
+  });
+
+  it("accepts only a bare non-negative revision as a transition acknowledgement", () => {
+    expect(mediaTransitionAckSchema.safeParse({ revision: 3 }).success).toBe(true);
+    for (const payload of [{ revision: -1 }, { revision: Infinity }, { revision: 2 ** 53 }, { revision: 1, zoneId: "forged" }, {}])
+      expect(mediaTransitionAckSchema.safeParse(payload).success).toBe(false);
   });
 
   it("requires exactly boolean mute and deafen preferences", () => {

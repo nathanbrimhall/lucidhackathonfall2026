@@ -1,6 +1,6 @@
 # M2 browser media check
 
-This harness verifies microphone capture, WebRTC transport, authoritative movement, and client proximity playback. Run it with three real browser users; SDK/server tests alone do not establish audible media behavior. Meeting zones are drawn only as future private audio and do not provide M3 isolation.
+This harness verifies microphone capture, WebRTC transport, authoritative movement, and client proximity playback. Run it with three real browser users; SDK/server tests alone do not establish audible media behavior. Meeting zones were placeholders in M2; private meeting audio is covered by [the M3 guide](M3_MEDIA_CHECK.md).
 
 ## Start
 
@@ -10,7 +10,7 @@ This harness verifies microphone capture, WebRTC transport, authoritative moveme
 4. Use three devices or separate browser profiles, preferably with headphones. Each user creates a distinct guest with the invite. A saved guest token is kept in per-tab `sessionStorage`; “Resume saved guest” reuses it after reload. Some browsers copy sessionStorage when duplicating a tab: use fresh profiles/tabs and create separate guests. Duplicate active guests should be rejected.
 5. Each user explicitly clicks **Enable microphone** and **Resume audio playback**. Microphones are off on initial join. Denying capture must not stop map movement or remote listening. Do not paste credentials into screenshots or logs.
 
-Focus the map to move with WASD/arrows. Coordinates are server owned; the browser sends sequenced direction input at 10 Hz. Dark geometry should stop avatars. Outlined meeting zones are M3 placeholders. The policy panel shows only public media identities, distance, gain, revision, and the count of successful LiveKit connections on this page; it never shows tokens or invite codes.
+Focus the map to move with WASD/arrows. Coordinates are server owned; the browser sends sequenced direction input at 10 Hz. Dark geometry should stop avatars. Outlined meeting zones are meeting rooms as of M3 (see the M3 guide). The policy panel shows only public media identities, distance, gain, revision, and the count of successful LiveKit connections on this page; it never shows tokens or invite codes.
 
 ## Three-person procedure
 

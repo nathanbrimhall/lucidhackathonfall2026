@@ -54,3 +54,15 @@ export function computeProximity(
 
   return [...byIdentity.values()].sort((a, b) => a.mediaIdentity.localeCompare(b.mediaIdentity));
 }
+
+/** Meeting occupants hear every other connected, unmuted occupant of the same zone at full gain. */
+export function computeMeetingAudio(listener: ProximityParticipant, participants: Iterable<ProximityParticipant>): ProximitySpeaker[] {
+  if (!listener.connected || listener.audioMode !== "meeting" || !listener.zoneId || listener.deafened) return [];
+  const byIdentity = new Map<string, ProximitySpeaker>();
+  for (const speaker of participants) {
+    if (!speaker.connected || speaker.audioMode !== "meeting" || speaker.muted || speaker.zoneId !== listener.zoneId
+      || speaker.sessionId === listener.sessionId || speaker.mediaIdentity === listener.mediaIdentity) continue;
+    byIdentity.set(speaker.mediaIdentity, { mediaIdentity: speaker.mediaIdentity, distance: Math.hypot(speaker.x - listener.x, speaker.y - listener.y), gain: 1 });
+  }
+  return [...byIdentity.values()].sort((a, b) => a.mediaIdentity.localeCompare(b.mediaIdentity));
+}

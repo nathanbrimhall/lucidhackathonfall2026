@@ -184,3 +184,181 @@ describe("LiveKit lifecycle webhooks", () => {
     expect(service.getBinding("s")!.roomName).not.toBe(oldRoom);
   });
 });
+
+describe("LiveKit meeting transitions and epochs", () => {
+  const meeting = (revision: number, roomName: string) => ({ revision, mode: "meeting" as const, zoneId: "zone", meetingSessionId: "meeting-1", roomName });
+  function deferred<T = void>() {
+    let resolve!: (value: T) => void, reject!: (error: unknown) => void;
+    const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+    return { promise, resolve, reject };
+  }
+
+  it("invalidates the old room immediately and gates destination credentials on revision, ack and removal", async () => {
+    const { service, backend } = fixture();
+    const identity = service.register("r", "u", "s", "Ada");
+    const floor = await service.issueToken("u", "s");
+    expect(floor).toMatchObject({ transitionRevision: 0, mode: "floor", zoneId: "" });
+    expect(floor).not.toHaveProperty("meetingSessionId");
+    service.transition("s", meeting(1, "meet_one"));
+    expect(service.getBinding("s")).toMatchObject({ roomName: "meet_one", transitionRevision: 1, pending: true, acked: false, mode: "meeting" });
+    expect(backend.removeParticipant).toHaveBeenCalledWith(floor.roomName, identity);
+    await expect(service.issueToken("u", "s")).rejects.toMatchObject({ code: "TRANSITION_PENDING" });
+    await expect(service.issueToken("u", "s", 0)).rejects.toMatchObject({ code: "STALE_TRANSITION" });
+    await expect(service.issueToken("u", "s", 2)).rejects.toMatchObject({ code: "STALE_TRANSITION" });
+    await expect(service.issueToken("u", "s", 1)).rejects.toMatchObject({ code: "TRANSITION_PENDING" });
+    expect(service.acknowledge("s", 0)).toBe(false);
+    expect(service.acknowledge("s", 2)).toBe(false);
+    expect(service.acknowledge("s", 1)).toBe(true);
+    expect(backend.issueToken).toHaveBeenCalledTimes(1);
+    const credentials = await service.issueToken("u", "s", 1);
+    expect(credentials).toMatchObject({ roomName: "meet_one", mediaIdentity: identity, transitionRevision: 1, mode: "meeting", zoneId: "zone", meetingSessionId: "meeting-1" });
+    expect(vi.mocked(backend.issueToken).mock.lastCall![0]).toMatchObject({ roomName: "meet_one", transitionRevision: 1 });
+    expect(service.getBinding("s")).toMatchObject({ pending: false });
+    await expect(service.issueToken("u", "s")).resolves.toMatchObject({ roomName: "meet_one" });
+    service.transition("s", { revision: 1, mode: "floor", zoneId: "" });
+    expect(service.getBinding("s")?.roomName).toBe("meet_one");
+    service.transition("s", { revision: 2, mode: "floor", zoneId: "" });
+    expect(service.getBinding("s")).toMatchObject({ roomName: floor.roomName, zoneId: "", meetingSessionId: undefined, pending: true });
+    expect(backend.removeParticipant).toHaveBeenLastCalledWith("meet_one", identity);
+    expect(() => service.transition("s", { ...meeting(3, "floor_forged") })).toThrow("INVALID_INPUT");
+  });
+
+  it("rejects credentials whose transition changed during removal or signing", async () => {
+    const removal = deferred(), signing = deferred<string>();
+    const { service, backend } = fixture({ removeParticipant: vi.fn(() => removal.promise) });
+    service.register("r", "u", "s", "Ada");
+    await service.issueToken("u", "s");
+    service.transition("s", meeting(1, "meet_one"));
+    service.acknowledge("s", 1);
+    const waiting = service.issueToken("u", "s", 1);
+    service.transition("s", meeting(2, "meet_two"));
+    removal.resolve();
+    await expect(waiting).rejects.toMatchObject({ code: "STALE_TRANSITION" });
+    expect(backend.issueToken).toHaveBeenCalledTimes(1);
+    service.acknowledge("s", 2);
+    vi.mocked(backend.issueToken).mockImplementationOnce(() => signing.promise);
+    const signed = service.issueToken("u", "s", 2);
+    await vi.waitFor(() => expect(backend.issueToken).toHaveBeenCalledTimes(2));
+    service.transition("s", { revision: 3, mode: "floor", zoneId: "" });
+    signing.resolve("meeting-token");
+    await expect(signed).rejects.toMatchObject({ code: "STALE_TRANSITION" });
+    service.acknowledge("s", 3);
+    // meet_two was never issued, so the floor return needs no removal.
+    await expect(service.issueToken("u", "s", 3)).resolves.toMatchObject({ mode: "floor", transitionRevision: 3 });
+  });
+
+  it("keeps a seat pending without credentials until old-room removal succeeds", async () => {
+    const { service, backend } = fixture();
+    const identity = service.register("r", "u", "s", "Ada");
+    const floor = await service.issueToken("u", "s");
+    vi.mocked(backend.removeParticipant).mockRejectedValueOnce(new Error("network"));
+    service.transition("s", meeting(1, "meet_one"));
+    service.acknowledge("s", 1);
+    await expect(service.issueToken("u", "s", 1)).rejects.toMatchObject({ code: "UNAVAILABLE" });
+    expect(service.getBinding("s")).toMatchObject({ pending: true, roomName: "meet_one" });
+    expect(backend.issueToken).toHaveBeenCalledTimes(1);
+    await expect(service.issueToken("u", "s", 1)).resolves.toMatchObject({ roomName: "meet_one" });
+    expect(vi.mocked(backend.removeParticipant).mock.calls.filter(([room, id]) => room === floor.roomName && id === identity)).toHaveLength(2);
+  });
+
+  it("evicts any identity joining a retired epoch and deletes it", async () => {
+    const { service, backend } = fixture();
+    const ada = service.register("r", "u", "s", "Ada"), bob = service.register("r", "v", "t", "Bob");
+    for (const [user, session] of [["u", "s"], ["v", "t"]]) {
+      service.transition(session, meeting(1, "meet_old")); service.acknowledge(session, 1);
+      await service.issueToken(user, session, 1);
+    }
+    service.transition("s", meeting(2, "meet_new"));
+    service.transition("t", { revision: 2, mode: "floor", zoneId: "" });
+    await service.retireRoom("meet_old");
+    expect(backend.deleteRoom).toHaveBeenCalledWith("meet_old");
+    vi.mocked(backend.removeParticipant).mockClear();
+    await service.handleWebhook(event("replay-bob", "participant_joined", "meet_old", bob));
+    await service.handleWebhook(event("replay-ada", "participant_joined", "meet_old", ada));
+    await service.handleWebhook(event("bob-pub", "track_published", "meet_new", bob));
+    expect(vi.mocked(backend.removeParticipant).mock.calls).toEqual([["meet_old", bob], ["meet_old", ada], ["meet_new", bob]]);
+    await expect(service.retireRoom("floor_x")).rejects.toMatchObject({ code: "INVALID_INPUT" });
+  });
+
+  it("cleans up floor and current meeting rooms, including on disposal", async () => {
+    const { service, backend } = fixture();
+    service.register("r", "u", "s", "Ada");
+    const floor = service.getBinding("s")!.roomName;
+    await service.issueToken("u", "s");
+    service.transition("s", meeting(1, "meet_live"));
+    await service.cleanupRoom("r");
+    expect(backend.deleteRoom).toHaveBeenCalledWith(floor);
+    expect(backend.deleteRoom).toHaveBeenCalledWith("meet_live");
+    service.register("other", "v", "t", "Bob");
+    service.transition("t", meeting(1, "meet_other"));
+    await service.unregister("t");
+    await service.dispose();
+    expect(backend.deleteRoom).toHaveBeenCalledWith("meet_other");
+  });
+
+  it("does not issue a room while a webhook eviction from it is still in flight", async () => {
+    const eviction = deferred();
+    const { service, backend } = fixture();
+    const identity = service.register("r", "u", "s", "Ada");
+    const floor = service.getBinding("s")!.roomName;
+    service.transition("s", meeting(1, "meet_one")); service.acknowledge("s", 1);
+    await service.issueToken("u", "s", 1);
+    vi.mocked(backend.removeParticipant).mockImplementation((room) => room === floor ? eviction.promise : Promise.resolve());
+    const webhook = service.handleWebhook(event("stale-floor", "participant_joined", floor, identity));
+    service.transition("s", { revision: 2, mode: "floor", zoneId: "" }); service.acknowledge("s", 2);
+    let settled = false;
+    const issued = service.issueToken("u", "s", 2).finally(() => { settled = true; });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(settled).toBe(false);
+    expect(backend.issueToken).toHaveBeenCalledTimes(1);
+    eviction.resolve();
+    await expect(issued).resolves.toMatchObject({ roomName: floor, transitionRevision: 2 });
+    await webhook;
+  });
+
+  it("retries a failed retired-room deletion on cleanup and disposal", async () => {
+    const { service, backend } = fixture({ listRooms: vi.fn(async () => ["meet_old"]), listParticipants: vi.fn(async () => []) });
+    service.register("r", "u", "s", "Ada");
+    service.transition("s", meeting(1, "meet_old"));
+    service.transition("s", meeting(2, "meet_new"));
+    vi.mocked(backend.deleteRoom).mockRejectedValueOnce(new Error("network"));
+    await expect(service.retireRoom("meet_old")).rejects.toMatchObject({ code: "UNAVAILABLE" });
+    await service.reconcile();
+    expect(vi.mocked(backend.deleteRoom).mock.calls.filter(([room]) => room === "meet_old")).toHaveLength(2);
+    vi.mocked(backend.deleteRoom).mockRejectedValueOnce(new Error("network"));
+    await service.retireRoom("meet_new").catch(() => {});
+    vi.mocked(backend.deleteRoom).mockClear();
+    await service.cleanupRoom("r");
+    expect(vi.mocked(backend.deleteRoom).mock.calls.map(([room]) => room).sort()).toEqual(["meet_new"]);
+    vi.mocked(backend.deleteRoom).mockClear();
+    await service.dispose();
+    expect(backend.deleteRoom).not.toHaveBeenCalled();
+
+    const other = fixture();
+    other.service.register("r", "u", "s", "Ada");
+    other.service.transition("s", meeting(1, "meet_stuck"));
+    other.service.transition("s", { revision: 2, mode: "floor", zoneId: "" });
+    vi.mocked(other.backend.deleteRoom).mockRejectedValueOnce(new Error("network"));
+    await other.service.retireRoom("meet_stuck").catch(() => {});
+    await other.service.dispose();
+    expect(vi.mocked(other.backend.deleteRoom).mock.calls.filter(([room]) => room === "meet_stuck")).toHaveLength(2);
+  });
+
+  it("reconciles orphaned rooms and unbound participants without touching current seats", async () => {
+    const listParticipants = vi.fn(async (_room: string) => ["stranger"]);
+    const { service, backend } = fixture({ listRooms: vi.fn(async () => [] as string[]), listParticipants });
+    const identity = service.register("r", "u", "s", "Ada");
+    const floor = service.getBinding("s")!.roomName;
+    service.transition("s", meeting(1, "meet_live"));
+    listParticipants.mockImplementation(async (room) => room === "meet_live" ? [identity, "stranger"] : [identity]);
+    vi.mocked(backend.listRooms!).mockResolvedValue([floor, "meet_live", "meet_orphan", "floor_orphan", "unmanaged"]);
+    await service.reconcile();
+    expect(vi.mocked(backend.deleteRoom).mock.calls.map(([room]) => room).sort()).toEqual(["floor_orphan", "meet_orphan"]);
+    expect(vi.mocked(backend.removeParticipant).mock.calls).toEqual(expect.arrayContaining([["meet_live", "stranger"], [floor, identity]]));
+    expect(backend.removeParticipant).not.toHaveBeenCalledWith("meet_live", identity);
+    vi.mocked(backend.listRooms!).mockRejectedValueOnce(new Error("network"));
+    await expect(service.reconcile()).rejects.toThrow();
+    vi.mocked(backend.deleteRoom).mockRejectedValueOnce(new Error("network"));
+    await expect(service.reconcile()).rejects.toMatchObject({ code: "UNAVAILABLE" });
+  });
+});

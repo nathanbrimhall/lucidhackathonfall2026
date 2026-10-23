@@ -10,8 +10,15 @@ export const Player = schema({
   lastProcessedInputSeq: t.float64().default(-1),
 }, "Player");
 
+/** Public occupancy only; LiveKit room names and epochs never enter synchronized state. */
+export const MeetingIndicator = schema({
+  zoneId: t.string(), meetingSessionId: t.string(), occupancy: t.number().default(0),
+  videoAvailable: t.boolean().default(false), videoCallActive: t.boolean().default(false),
+  assistantStatus: t.string().default("none"),
+}, "MeetingIndicator");
+
 export const OfficeState = schema({
   officeId: t.string(), protocolVersion: t.number().default(PROTOCOL_VERSION),
   mapId: t.string(), mapVersion: t.number(), serverTick: t.float64().default(0),
-  players: t.map(Player),
+  players: t.map(Player), meetings: t.map(MeetingIndicator),
 }, "OfficeState");

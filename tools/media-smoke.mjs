@@ -21,10 +21,14 @@ async function attached(user) { return user.page.locator('#audio-elements audio'
 async function audioStats(user) {
   return user.page.evaluate(async () => {
     const result = [];
-    for (const pc of window.__mediaSmoke.pcs) for (const stat of (await pc.getStats()).values()) if (stat.type === 'inbound-rtp' && stat.kind === 'audio') result.push({ id: stat.id, track: stat.trackIdentifier, bytes: stat.bytesReceived ?? 0, energy: stat.totalAudioEnergy ?? 0, samples: stat.totalSamplesReceived ?? 0 });
+    for (const pc of window.__mediaSmoke.pcs) if (pc.connectionState !== 'closed') for (const stat of (await pc.getStats()).values()) if (stat.type === 'inbound-rtp' && stat.kind === 'audio') result.push({ id: stat.id, track: stat.trackIdentifier, bytes: stat.bytesReceived ?? 0, energy: stat.totalAudioEnergy ?? 0, samples: stat.totalSamplesReceived ?? 0 });
     return result;
   });
 }
+const connects = async user => Number(/LiveKit connects this page[^:]*: (\d+)/.exec(await policy(user))?.[1] ?? -1);
+const mode = async user => /mode (\w+)/.exec(await policy(user))?.[1];
+const gainOf = async (user, speaker) => (await policy(user)).split('\n').find(line => line.startsWith(`${speaker.identity} · distance`))?.split('gain ')[1];
+const totalBytes = async user => (await audioStats(user)).reduce((sum, s) => sum + s.bytes, 0);
 async function move(user, x, y = 3) {
   const position = () => user.page.evaluate(name => window.__mediaSmoke.positions[name], user.name);
   await user.page.locator('#map').focus();
@@ -83,8 +87,30 @@ try {
   await move(c, 9.5); await until(async () => await has(a,c) && (await policy(a)).split('\n').some(line => line.startsWith(c.identity) && line.endsWith('gain 0.00')), 'retained zero-gain hysteresis band');
   await until(async () => { const values = await volumes(a); return values.length === 2 && values[0] < .01 && values[1] > .1 && values[1] < .4; }, 'zero-gain band and independent nearby playback volume');
   await move(c, 10.5); await until(async () => !await has(a,c), 'exit beyond seven tiles');
-  for (const user of users) assert.match(await policy(user), /LiveKit connects this page: 1/, 'movement must not reconnect LiveKit');
+  for (const user of users) assert.match(await policy(user), /LiveKit connects this page[^:]*: 1$/m, 'movement must not reconnect LiveKit');
   console.log('PASS: entry/exit hysteresis and zero-gain band; one LiveKit connection per browser throughout movement.');
+  // M3: A and B enter the east meeting room through the doorway (wall x 21-21.5, gap y 6-8); C waits on the floor just outside.
+  // Walk along y=3 first to avoid the desk block at x 8-12, y 5-7.
+  for (const [user, x, y] of [[a, 18, 7], [b, 18.5, 7], [c, 19.5, 7]]) { await move(user, x, 3); await move(user, x, y); }
+  await until(async () => await mode(a) === 'floor' && await has(a,b) && await has(a,c), 'floor policies at the doorway');
+  const floorConnects = await connects(c);
+  await move(a, 24, 6.5); await move(b, 24, 7.5);
+  await until(async () => (await a.page.locator('#meeting').textContent()).startsWith('In ') && (await b.page.locator('#meeting').textContent()).startsWith('In '), 'meeting entered status');
+  await until(async () => await mode(a) === 'meeting' && await mode(b) === 'meeting' && await gainOf(a,b) === '1.00' && await gainOf(b,a) === '1.00', 'meeting policies with each other at gain 1', 30000);
+  await until(async () => await connects(a) >= 2 && await connects(b) >= 2, 'transition reconnected both meeting participants');
+  await until(async () => await attached(a) === 1 && await attached(b) === 1 && (await volumes(a))[0] > .98 && (await volumes(b))[0] > .98, 'meeting playback attached at full volume');
+  await until(async () => (await audioStats(a)).some(s => s.bytes > 0 && s.energy > 0) && (await audioStats(b)).some(s => s.bytes > 0 && s.energy > 0), 'inbound meeting audio energy', 30000);
+  await until(async () => await mode(c) === 'floor' && !await has(c,a) && !await has(c,b) && await attached(c) === 0, 'floor listener sees neither meeting occupant');
+  const cBytes = await totalBytes(c); await delay(1500);
+  assert.equal(await totalBytes(c), cBytes, 'C receives no inbound RTP from meeting occupants');
+  assert.equal(await connects(c), floorConnects, 'floor listener not reconnected by others entering a room');
+  console.log('PASS: A and B hear each other privately in the east meeting room; floor listener C hears neither.');
+  const bConnects = await connects(b);
+  await move(a, 18, 7);
+  await until(async () => await mode(a) === 'floor' && !await has(a,b) && (await a.page.locator('#meeting').textContent()).startsWith('On the open floor'), 'A returns to floor mode');
+  await until(async () => await connects(b) > bConnects && await mode(b) === 'meeting', 'B rotates epoch and stays in meeting mode', 30000);
+  await until(async () => !await has(b,a) && await attached(a) <= 1, 'A and B no longer hear each other');
+  console.log('PASS: A exiting returns to floor audio; B epoch-rotates within the meeting and no longer receives A.');
   // Closing the signaling transports simulates an office transport failure without stopping shared services.
   await a.context.setOffline(true);
   await until(async () => (await a.page.locator('#media-status').textContent()).startsWith('Media stopped'), 'offline fail-closed UI', 25000);
@@ -94,7 +120,7 @@ try {
   console.log('PASS: network drop closes peer connections and remote playback; retry remains manual.');
   console.log('Synthetic browser media smoke passed. This does not establish human audibility or separate-device/network connectivity.');
 } catch (error) {
-  for (const user of users) console.log(user.name, { policy: await policy(user), audioElements: await user.page.locator('#audio-elements audio').count(), status: await user.page.locator('#status').textContent() });
+  for (const user of users) console.log(user.name, { policy: await policy(user), audioElements: await user.page.locator('#audio-elements audio').count(), status: await user.page.locator('#status').textContent(), media: await user.page.locator('#media-status').textContent(), meeting: await user.page.locator('#meeting').textContent() });
   throw new Error(error instanceof Error ? error.message.split('\n')[0] : 'Synthetic media validation failed');
 } finally {
   await Promise.allSettled(users.map(user => user.page.locator('#leave').click({ timeout: 1500 })));

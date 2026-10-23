@@ -25,6 +25,7 @@ export function createApplication(config: Config, roomOptions: OfficeRoomOptions
   let stopping = false;
   let mediaStatus: "unknown" | "up" | "down" = "unknown";
   let mediaTimer: NodeJS.Timeout | undefined;
+  let reconcileTimer: NodeJS.Timeout | undefined;
   const mediaAbort = new AbortController();
   const compiledHarness = fileURLToPath(new URL("../media-harness/", import.meta.url));
   const harnessPath = existsSync(compiledHarness) ? compiledHarness : fileURLToPath(new URL("../../dist/server/media-harness/", import.meta.url));
@@ -105,8 +106,8 @@ export function createApplication(config: Config, roomOptions: OfficeRoomOptions
       app.post("/api/media/token", async (req, res) => {
         const identity = auth.authenticate(bearer(req.headers.authorization));
         const parsed = mediaTokenSchema.safeParse(req.body);
-        if (!parsed.success) throw new AuthError("INVALID_INPUT", "Expected {sessionId}");
-        res.json(await media.issueToken(identity.userId, parsed.data.sessionId));
+        if (!parsed.success) throw new AuthError("INVALID_INPUT", "Expected {sessionId, transitionRevision?}");
+        res.json(await media.issueToken(identity.userId, parsed.data.sessionId, parsed.data.transitionRevision));
       });
       app.get("/api/sessions/current", (req, res) => res.json(auth.authenticate(bearer(req.headers.authorization))));
       app.get("/api/offices/:officeId/map", (req, res) => {
@@ -125,7 +126,7 @@ export function createApplication(config: Config, roomOptions: OfficeRoomOptions
       });
       const handleError: ErrorRequestHandler = (error, _req, res, _next) => {
         if (error instanceof MediaError) {
-          const status = { INVALID_INPUT: 400, UNAUTHORIZED: 401, FORBIDDEN: 403, UNAVAILABLE: 503 }[error.code];
+          const status = { INVALID_INPUT: 400, UNAUTHORIZED: 401, FORBIDDEN: 403, UNAVAILABLE: 503, STALE_TRANSITION: 409, TRANSITION_PENDING: 409 }[error.code];
           res.status(status).json(errorBody(error.code, error.message)); return;
         }
         if (error instanceof OfficeJoinError) {
@@ -160,6 +161,11 @@ export function createApplication(config: Config, roomOptions: OfficeRoomOptions
       void checkMedia();
       mediaTimer = setInterval(() => void checkMedia(), 10_000);
       mediaTimer.unref();
+      // Startup reconciliation removes orphaned media rooms from a previous process.
+      const reconcile = () => void media.reconcile().catch(() => log("media.reconcile.failed"));
+      reconcile();
+      reconcileTimer = setInterval(reconcile, 30_000);
+      reconcileTimer.unref();
       const address = httpServer.address();
       return typeof address === "object" && address ? address.port : port;
     },
@@ -167,6 +173,7 @@ export function createApplication(config: Config, roomOptions: OfficeRoomOptions
       if (stopping) return;
       stopping = true;
       if (mediaTimer) clearInterval(mediaTimer);
+      if (reconcileTimer) clearInterval(reconcileTimer);
       mediaAbort.abort();
       try { await server.gracefullyShutdown(false); }
       finally {
