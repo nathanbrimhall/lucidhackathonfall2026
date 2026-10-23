@@ -20,6 +20,8 @@ jobs:
       - run: cp .env.example .env
       - run: docker compose up --build -d --wait --wait-timeout 120
       - run: npm run smoke
+      - run: npx playwright install --with-deps chromium
+      - run: npm run smoke:media
       - if: failure()
         run: docker compose logs --no-color
       - if: always()

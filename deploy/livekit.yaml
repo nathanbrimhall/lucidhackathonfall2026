@@ -5,3 +5,8 @@ rtc:
   use_external_ip: true
 logging:
   level: info
+webhook:
+  # Signing key is supplied by LIVEKIT_WEBHOOK_API_KEY in Compose.
+  # Update this callback if the application's PORT or deployment topology changes.
+  urls:
+    - http://server:2567/api/livekit/webhook

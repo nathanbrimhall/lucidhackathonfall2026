@@ -69,9 +69,11 @@ async function main() {
   try {
     const firstRoom = roomOne = await clientOne.consumeSeatReservation<SmokeState>(seatOne);
     firstRoom.onMessage("session.ready", () => {});
+    firstRoom.onMessage("audio.policy", () => {});
     firstRoom.onMessage("request.error", (error: unknown) => resolveRequestError?.(error));
     const secondRoom = roomTwo = await clientTwo.consumeSeatReservation<SmokeState>(seatTwo);
     secondRoom.onMessage("session.ready", () => {});
+    secondRoom.onMessage("audio.policy", () => {});
     secondRoom.onMessage("request.error", () => {});
     assert.equal(firstRoom.roomId, secondRoom.roomId, "both clients must join the same office room");
     await waitFor(() => Boolean(findPlayer(firstRoom, firstGuest.userId) && findPlayer(firstRoom, secondGuest.userId)), "Both identities did not appear in the first room");

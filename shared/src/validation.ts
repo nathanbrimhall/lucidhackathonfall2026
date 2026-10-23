@@ -13,3 +13,6 @@ export const playerInputSchema = z.strictObject({
 export const playerStatusSchema = z.strictObject({
   status: z.enum(["available", "away", "busy"]),
 });
+
+export const mediaTokenSchema = z.strictObject({ sessionId: z.string().min(1).max(128) });
+export const mediaPreferencesSchema = z.strictObject({ muted: z.boolean(), deafened: z.boolean() });

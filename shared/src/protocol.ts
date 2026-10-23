@@ -23,6 +23,19 @@ export type PlayerStatus = "available" | "away" | "busy";
 export interface PlayerInput { seq: number; dx: number; dy: number }
 export interface PlayerStatusRequest { status: PlayerStatus }
 
+/** Private audio messages; media identities are never authorization claims. */
+export interface MediaPreferences { muted: boolean; deafened: boolean }
+export interface MediaTokenRequest { sessionId: string }
+export interface MediaCredentials {
+  url: string;
+  token: string;
+  mediaIdentity: string;
+  roomName: string;
+  expiresAt: string;
+}
+export interface AudioSpeaker { mediaIdentity: string; distance: number; gain: number }
+export interface AudioPolicy { revision: number; speakers: AudioSpeaker[] }
+
 /** Renderer-independent public state synchronized by the office room. */
 export interface PlayerState {
   userId: string;

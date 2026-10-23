@@ -1,10 +1,12 @@
 // Foundation adapted from create-colyseus-app 0.18.1's TypeScript minimal starter.
 import { createServer } from "node:http";
+import { fileURLToPath } from "node:url";
+import { existsSync } from "node:fs";
 import { defineServer, defineRoom, matchMaker } from "@colyseus/core";
 import { WebSocketTransport } from "@colyseus/ws-transport";
 import express, { type ErrorRequestHandler } from "express";
 import { OFFICE_ROOM, PROTOCOL_VERSION, type ErrorCode } from "../../shared/src/protocol.js";
-import { joinOfficeSchema } from "../../shared/src/validation.js";
+import { joinOfficeSchema, mediaTokenSchema } from "../../shared/src/validation.js";
 import { AuthError, AuthService } from "./auth/AuthService.js";
 import type { Config } from "./config.js";
 import { log } from "./log.js";
@@ -12,8 +14,9 @@ import { openStorage } from "./repositories/Storage.js";
 import { createOfficeRoom, type OfficeRoomOptions } from "./rooms/OfficeRoom.js";
 import { OfficeRegistry, OfficeJoinError } from "./rooms/OfficeRegistry.js";
 import { loadOfficeMap } from "./domain/map.js";
+import { LiveKitService, MediaError } from "./services/LiveKitService.js";
 
-export function createApplication(config: Config, roomOptions: OfficeRoomOptions = {}) {
+export function createApplication(config: Config, roomOptions: OfficeRoomOptions = {}, media = new LiveKitService(config)) {
   const map = loadOfficeMap();
   const storage = openStorage(config.databasePath);
   const auth = new AuthService(storage, config);
@@ -23,6 +26,8 @@ export function createApplication(config: Config, roomOptions: OfficeRoomOptions
   let mediaStatus: "unknown" | "up" | "down" = "unknown";
   let mediaTimer: NodeJS.Timeout | undefined;
   const mediaAbort = new AbortController();
+  const compiledHarness = fileURLToPath(new URL("../media-harness/", import.meta.url));
+  const harnessPath = existsSync(compiledHarness) ? compiledHarness : fileURLToPath(new URL("../../dist/server/media-harness/", import.meta.url));
   const rateWindows = new Map<string, { count: number; expires: number }>();
   const errorBody = (code: ErrorCode, message: string) => ({ error: { code, message } });
 
@@ -46,9 +51,20 @@ export function createApplication(config: Config, roomOptions: OfficeRoomOptions
         if (stopping || (origin && !config.allowedOrigins.includes(origin))) return new Response(null, { status: 403 });
       },
     }),
-    rooms: { [OFFICE_ROOM]: defineRoom(createOfficeRoom(auth, config.officeId, offices, map, roomOptions)) },
+    rooms: { [OFFICE_ROOM]: defineRoom(createOfficeRoom(auth, config.officeId, offices, map, roomOptions, media)) },
     express: (app) => {
       app.disable("x-powered-by");
+      // Verify the exact raw body. Service callbacks bypass browser-origin and
+      // guest HTTP rate limits, but still have a bounded payload and signed auth.
+      app.post("/api/livekit/webhook", express.text({ type: "application/webhook+json", limit: "64kb" }), async (req, res) => {
+        if (stopping) { res.sendStatus(503); return; }
+        if (!req.is("application/webhook+json") || typeof req.body !== "string") {
+          res.status(400).json(errorBody("INVALID_INPUT", "Expected application/webhook+json")); return;
+        }
+        const event = await media.verifyWebhook(req.body, req.headers.authorization);
+        await media.handleWebhook(event);
+        res.sendStatus(204);
+      });
       app.use((req, res, next) => {
         const origin = req.headers.origin;
         if (origin && !config.allowedOrigins.includes(origin)) { res.status(403).json(errorBody("FORBIDDEN", "Origin is not allowed")); return; }
@@ -63,6 +79,7 @@ export function createApplication(config: Config, roomOptions: OfficeRoomOptions
         next();
       });
       app.get("/healthz", (_req, res) => res.json({ status: "ok" }));
+      app.use("/media-harness", express.static(harnessPath, { index: "index.html" }));
       app.get("/readyz", (_req, res) => {
         let ready = false;
         try { ready = !stopping && storage.healthCheck(); } catch { /* storage unavailable */ }
@@ -85,6 +102,12 @@ export function createApplication(config: Config, roomOptions: OfficeRoomOptions
       });
       app.use(express.json({ limit: "4kb", strict: true }));
       app.post("/api/sessions/guest", (req, res) => res.status(201).json(auth.createGuest(req.body)));
+      app.post("/api/media/token", async (req, res) => {
+        const identity = auth.authenticate(bearer(req.headers.authorization));
+        const parsed = mediaTokenSchema.safeParse(req.body);
+        if (!parsed.success) throw new AuthError("INVALID_INPUT", "Expected {sessionId}");
+        res.json(await media.issueToken(identity.userId, parsed.data.sessionId));
+      });
       app.get("/api/sessions/current", (req, res) => res.json(auth.authenticate(bearer(req.headers.authorization))));
       app.get("/api/offices/:officeId/map", (req, res) => {
         const identity = auth.authenticate(bearer(req.headers.authorization));
@@ -101,6 +124,10 @@ export function createApplication(config: Config, roomOptions: OfficeRoomOptions
         res.json(seat);
       });
       const handleError: ErrorRequestHandler = (error, _req, res, _next) => {
+        if (error instanceof MediaError) {
+          const status = { INVALID_INPUT: 400, UNAUTHORIZED: 401, FORBIDDEN: 403, UNAVAILABLE: 503 }[error.code];
+          res.status(status).json(errorBody(error.code, error.message)); return;
+        }
         if (error instanceof OfficeJoinError) {
           res.status(409).json(errorBody(error.code, error.message)); return;
         }
@@ -109,7 +136,7 @@ export function createApplication(config: Config, roomOptions: OfficeRoomOptions
           res.status(status).json(errorBody(error.code, error.message)); return;
         }
         if (error?.type === "entity.too.large" || error?.type === "entity.parse.failed") {
-          res.status(error.type === "entity.too.large" ? 413 : 400).json(errorBody("INVALID_INPUT", "Invalid JSON body or request exceeds 4 KiB")); return;
+          res.status(error.type === "entity.too.large" ? 413 : 400).json(errorBody("INVALID_INPUT", "Invalid JSON body or request exceeds the route's size limit")); return;
         }
         log("request.failed");
         res.status(500).json(errorBody("INTERNAL_ERROR", "Request failed"));
@@ -142,7 +169,10 @@ export function createApplication(config: Config, roomOptions: OfficeRoomOptions
       if (mediaTimer) clearInterval(mediaTimer);
       mediaAbort.abort();
       try { await server.gracefullyShutdown(false); }
-      finally { storage.close(); }
+      finally {
+        try { await media.dispose(); } catch { log("media.cleanup.failed"); }
+        storage.close();
+      }
     },
   };
 }

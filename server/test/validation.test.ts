@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { playerInputSchema, playerStatusSchema } from "../../shared/src/validation.js";
+import { mediaPreferencesSchema, mediaTokenSchema, playerInputSchema, playerStatusSchema } from "../../shared/src/validation.js";
 
 describe("runtime movement and status validation", () => {
   it("accepts bounded finite direction intent and a safe nonnegative sequence", () => {
@@ -27,5 +27,26 @@ describe("runtime movement and status validation", () => {
     }
     expect(playerStatusSchema.safeParse({ status: "offline" }).success).toBe(false);
     expect(playerStatusSchema.safeParse({ status: "busy", userId: "forged" }).success).toBe(false);
+  });
+});
+
+describe("media request validation", () => {
+  it("accepts only a bounded session identifier for token requests", () => {
+    expect(mediaTokenSchema.safeParse({ sessionId: "seat-session" }).success).toBe(true);
+    for (const payload of [
+      { sessionId: "seat-session", roomName: "forged-room" },
+      { sessionId: "seat-session", mediaIdentity: "forged-identity" },
+      { sessionId: "" },
+      { sessionId: "x".repeat(129) },
+    ]) expect(mediaTokenSchema.safeParse(payload).success).toBe(false);
+  });
+
+  it("requires exactly boolean mute and deafen preferences", () => {
+    expect(mediaPreferencesSchema.safeParse({ muted: true, deafened: false }).success).toBe(true);
+    for (const payload of [
+      { muted: "false", deafened: false },
+      { muted: false, deafened: 0 },
+      { muted: false, deafened: false, mediaIdentity: "forged" },
+    ]) expect(mediaPreferencesSchema.safeParse(payload).success).toBe(false);
   });
 });

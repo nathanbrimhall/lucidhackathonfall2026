@@ -4,15 +4,18 @@
   "private": true,
   "type": "module",
   "description": "Colyseus virtual office server",
-  "engines": { "node": ">=24 <27" },
+  "engines": {
+    "node": ">=24 <27"
+  },
   "scripts": {
     "dev": "tsx watch --env-file=.env server/src/index.ts",
-    "build": "tsc -p tsconfig.build.json && node scripts/copy-assets.cjs",
+    "build": "tsc -p tsconfig.build.json && node scripts/copy-assets.cjs && node scripts/build-media-harness.mjs",
     "typecheck": "tsc --noEmit",
     "start": "node --env-file-if-exists=.env dist/server/src/index.js",
     "migrate": "node --env-file-if-exists=.env dist/server/src/migrate.js",
     "test": "vitest run",
-    "smoke": "tsx --env-file-if-exists=.env tools/smoke-client.ts"
+    "smoke": "tsx --env-file-if-exists=.env tools/smoke-client.ts",
+    "smoke:media": "node --env-file-if-exists=.env tools/media-smoke.mjs"
   },
   "dependencies": {
     "@colyseus/core": "0.18.23",
@@ -21,6 +24,7 @@
     "@colyseus/ws-transport": "0.18.4",
     "better-sqlite3": "12.11.1",
     "express": "5.2.1",
+    "livekit-server-sdk": "2.19.2",
     "zod": "4.4.3"
   },
   "devDependencies": {
@@ -29,6 +33,9 @@
     "@types/better-sqlite3": "7.6.13",
     "@types/express": "5.0.6",
     "@types/node": "24.19.2",
+    "esbuild": "0.28.2",
+    "livekit-client": "2.23.0",
+    "playwright": "1.64.1",
     "tsx": "4.23.0",
     "typescript": "5.9.3",
     "vitest": "4.1.12"
