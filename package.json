@@ -12,16 +12,20 @@
     "build": "tsc -p tsconfig.build.json && node scripts/copy-assets.cjs && node scripts/build-media-harness.mjs",
     "typecheck": "tsc --noEmit",
     "start": "node --env-file-if-exists=.env dist/server/src/index.js",
+    "worker:dev": "tsx --env-file=.env worker/src/index.ts",
+    "worker:start": "node --env-file-if-exists=.env dist/worker/src/index.js",
     "migrate": "node --env-file-if-exists=.env dist/server/src/migrate.js",
     "test": "vitest run",
     "smoke": "tsx --env-file-if-exists=.env tools/smoke-client.ts",
-    "smoke:media": "node --env-file-if-exists=.env tools/media-smoke.mjs"
+    "smoke:media": "node --env-file-if-exists=.env tools/media-smoke.mjs",
+    "smoke:ai-media": "tsx --env-file-if-exists=.env tools/ai-media-smoke.ts"
   },
   "dependencies": {
     "@colyseus/core": "0.18.23",
     "@colyseus/schema": "5.0.42",
     "@colyseus/tools": "0.18.10",
     "@colyseus/ws-transport": "0.18.4",
+    "@livekit/rtc-node": "1.2.1",
     "better-sqlite3": "12.11.1",
     "express": "5.2.1",
     "livekit-server-sdk": "2.19.2",

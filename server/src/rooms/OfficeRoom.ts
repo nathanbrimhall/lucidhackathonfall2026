@@ -1,7 +1,7 @@
 import { Room, ServerError, type Client } from "@colyseus/core";
 import { PROTOCOL_VERSION, type PlayerInput, type ErrorCode, type MediaPreferences, type MediaTransition, type AudioPolicy, type MeetingEntered, type MeetingExited } from "../../../shared/src/protocol.js";
 import type { OfficeMap } from "../../../shared/src/map-contract.js";
-import { joinOfficeSchema, playerInputSchema, playerStatusSchema, mediaPreferencesSchema, mediaTransitionAckSchema } from "../../../shared/src/validation.js";
+import { joinOfficeSchema, playerInputSchema, playerStatusSchema, mediaPreferencesSchema, mediaTransitionAckSchema, aiRequestSchema, aiConsentSchema, aiStopSchema } from "../../../shared/src/validation.js";
 import { AuthError, type AuthService } from "../auth/AuthService.js";
 import { movePlayer, SIMULATION_INTERVAL_MS } from "../domain/movement.js";
 import { OfficeRegistry, SEAT_RESERVATION_SECONDS } from "./OfficeRegistry.js";
@@ -10,6 +10,7 @@ import { computeMeetingAudio, computeProximity, type ProximityParticipant } from
 import { zoneAt } from "../domain/meeting-zones.js";
 import { Meetings, type MeetingChange } from "../domain/meetings.js";
 import type { LiveKitService } from "../services/LiveKitService.js";
+import { AIError, type AISessionService, type AIMeeting } from "../services/AISessionService.js";
 import { log } from "../log.js";
 
 export const INPUT_TIMEOUT_MS = 250;
@@ -17,7 +18,7 @@ export const RECONNECTION_SECONDS = 30;
 interface InputState { input?: PlayerInput; receivedAt: number; lastSeq: number; windowStart: number; count: number; rateErrorSent: boolean }
 export interface OfficeRoomOptions { reconnectionSeconds?: number; maxClients?: number }
 
-export function createOfficeRoom(auth: AuthService, officeId: string, registry: OfficeRegistry, map: OfficeMap, options: OfficeRoomOptions = {}, media?: LiveKitService) {
+export function createOfficeRoom(auth: AuthService, officeId: string, registry: OfficeRegistry, map: OfficeMap, options: OfficeRoomOptions = {}, media?: LiveKitService, ai?: AISessionService) {
   return class OfficeRoom extends Room<{ state: InstanceType<typeof OfficeState> }> {
     maxClients = options.maxClients ?? 20;
     autoDispose = false;
@@ -29,6 +30,7 @@ export function createOfficeRoom(auth: AuthService, officeId: string, registry: 
     private policyRevision = 0;
     private readonly mediaRemovals = new Set<Promise<void>>();
     private readonly meetings = new Meetings();
+    private readonly aiMeetings = new Map<string,string>();
 
     static async onAuth(token: string, payload: unknown) {
       if (!joinOfficeSchema.safeParse(payload).success) throw new ServerError(400, "INVALID_INPUT");
@@ -44,6 +46,22 @@ export function createOfficeRoom(auth: AuthService, officeId: string, registry: 
       this.setPatchRate(50);
       this.setSimulationInterval((elapsedMs) => this.simulate(elapsedMs), SIMULATION_INTERVAL_MS);
       this.clock.setInterval(() => this.sendAudioPolicies(), 200);
+      for (const [event, schema] of [["ai.request", aiRequestSchema], ["ai.consent", aiConsentSchema], ["ai.stop", aiStopSchema]] as const) {
+        this.onMessage(event, (client, payload) => {
+          if (!this.consumeMessage(client)) return;
+          const parsed = schema.safeParse(payload);
+          if (!parsed.success) { this.error(client, "INVALID_INPUT", "Invalid AI request"); return; }
+          if (!ai) { this.error(client, "AI_UNAVAILABLE", "AI notes unavailable"); return; }
+          try {
+            if (event === "ai.request") ai.request(this.meetings.session(this.meetings.zoneOf(client.sessionId))?.meetingSessionId ?? "", client.sessionId, (parsed.data as {requestId:string}).requestId);
+            else {
+              const data = parsed.data as {aiSessionId:string; revision:number; consent?:boolean};
+              if (event === "ai.consent") ai.consent(client.sessionId, data.aiSessionId, data.revision, data.consent!);
+              else ai.stop(client.sessionId, data.aiSessionId, data.revision);
+            }
+          } catch (error) { this.error(client, error instanceof AIError ? error.code : "INTERNAL_ERROR", error instanceof AIError ? error.message : "AI request failed"); }
+        });
+      }
       this.onMessage("media.preferences", (client, payload) => {
         if (!this.consumeMessage(client)) return;
         const parsed = mediaPreferencesSchema.safeParse(payload);
@@ -128,6 +146,8 @@ export function createOfficeRoom(auth: AuthService, officeId: string, registry: 
 
     onBeforeShutdown() {
       this.stopping = true;
+      for (const id of this.aiMeetings.values()) ai?.syncMeeting(id);
+      this.aiMeetings.clear();
       for (const sessionId of this.state.players.keys()) this.removeMedia(sessionId);
       this.pendingInputs.clear(); super.onBeforeShutdown();
     }
@@ -160,6 +180,32 @@ export function createOfficeRoom(auth: AuthService, officeId: string, registry: 
 
     // Bindings move off a retired room before it is deleted; transitions never unmute.
     private applyMeetings(change: MeetingChange) {
+      // Invalidate AI leases before issuing destination media authorization. Entry with
+      // an active assistant also retires the epoch: old worker tokens reach no current speech.
+      for (const zoneId of new Set([...change.zones, ...change.transitions.filter(t=>t.mode === "meeting").map(t=>t.zoneId)])) {
+        const session = this.meetings.session(zoneId);
+        const previous = this.aiMeetings.get(zoneId);
+        if (previous && previous !== session?.meetingSessionId) { ai?.syncMeeting(previous); this.aiMeetings.delete(zoneId); }
+        if (!session) continue;
+        this.aiMeetings.set(zoneId, session.meetingSessionId);
+        const host: AIMeeting = {
+          meetingSessionId: session.meetingSessionId, roomName: session.roomName,
+          members: [...session.occupants].flatMap(sessionId => {
+            const player = this.state.players.get(sessionId), binding = media?.getBinding(sessionId);
+            return player && binding ? [{sessionId, userId:player.userId, displayName:player.displayName, mediaIdentity:binding.mediaIdentity}] : [];
+          }),
+          send: (userId,event,payload) => { for (const client of this.clients) if (this.state.players.get(client.sessionId)?.userId === userId) client.send(event,payload); },
+          indicator: status => { const indicator = this.state.meetings.get(zoneId); if(indicator) indicator.assistantStatus = status; },
+          rotate: () => this.applyMeetings(this.meetings.rotate(zoneId)),
+        };
+        if (ai?.syncMeeting(session.meetingSessionId,host)) {
+          const rotated = this.meetings.rotate(zoneId);
+          const affected = new Set(rotated.transitions.map(t=>t.sessionId));
+          change.transitions = [...change.transitions.filter(t=>!affected.has(t.sessionId)),...rotated.transitions];
+          change.retiredRooms.push(...rotated.retiredRooms);
+          host.roomName = session.roomName;
+        }
+      }
       for (const transition of change.transitions) {
         const player = this.state.players.get(transition.sessionId);
         if (player) player.audioMode = transition.mode;
@@ -189,6 +235,7 @@ export function createOfficeRoom(auth: AuthService, officeId: string, registry: 
         const { sessionId: _sessionId, roomName: _roomName, ...message } = transition;
         this.clients.getById(transition.sessionId)?.send("media.transition", message satisfies MediaTransition);
       }
+      for (const transition of change.transitions) ai?.statusFor(transition.sessionId);
       if (change.transitions.length || change.zones.length) this.sendAudioPolicies();
     }
 

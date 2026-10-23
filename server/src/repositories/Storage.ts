@@ -11,7 +11,8 @@ export interface UserRecord {
 
 /** SQLite owner for the application process. Workers must use an internal API. */
 export class Storage {
-  private readonly db: Database.Database;
+  /** Application-owned connection; never shared with workers. */
+  readonly db: Database.Database;
 
   constructor(databasePath: string) {
     if (databasePath !== ":memory:") mkdirSync(dirname(databasePath), { recursive: true });
@@ -31,10 +32,10 @@ export class Storage {
     // BEGIN IMMEDIATE serializes concurrent migration commands across processes.
     const migrate = this.db.transaction(() => {
       this.db.exec("CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)");
-      if (!this.db.prepare("SELECT version FROM schema_migrations WHERE version = 1").get()) {
-        const sql = readFileSync(new URL("../../migrations/001_identity.sql", import.meta.url), "utf8");
-        this.db.exec(sql);
-        this.db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)").run(1, new Date().toISOString());
+      for (const [version, file] of [[1, "001_identity.sql"], [2, "002_ai_notes.sql"]] as const) {
+        if (this.db.prepare("SELECT version FROM schema_migrations WHERE version = ?").get(version)) continue;
+        this.db.exec(readFileSync(new URL(`../../migrations/${file}`, import.meta.url), "utf8"));
+        this.db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)").run(version, new Date().toISOString());
       }
     });
     migrate.immediate();

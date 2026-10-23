@@ -14,6 +14,9 @@ import { openStorage } from "./repositories/Storage.js";
 import { createOfficeRoom, type OfficeRoomOptions } from "./rooms/OfficeRoom.js";
 import { OfficeRegistry, OfficeJoinError } from "./rooms/OfficeRegistry.js";
 import { loadOfficeMap } from "./domain/map.js";
+import { AIRepository } from "./repositories/AIRepository.js";
+import { AISessionService, AIError } from "./services/AISessionService.js";
+import { aiWorkerClaimSchema, aiWorkerLeaseSchema, aiWorkerSegmentsSchema, aiWorkerCompleteSchema, aiWorkerFailSchema } from "../../shared/src/ai-worker.js";
 import { LiveKitService, MediaError } from "./services/LiveKitService.js";
 
 export function createApplication(config: Config, roomOptions: OfficeRoomOptions = {}, media = new LiveKitService(config)) {
@@ -21,10 +24,12 @@ export function createApplication(config: Config, roomOptions: OfficeRoomOptions
   const storage = openStorage(config.databasePath);
   const auth = new AuthService(storage, config);
   const offices = new OfficeRegistry();
+  const ai = new AISessionService(new AIRepository(storage), config, media);
   const httpServer = createServer();
   let stopping = false;
   let mediaStatus: "unknown" | "up" | "down" = "unknown";
   let mediaTimer: NodeJS.Timeout | undefined;
+  let aiTimer: NodeJS.Timeout | undefined;
   let reconcileTimer: NodeJS.Timeout | undefined;
   const mediaAbort = new AbortController();
   const compiledHarness = fileURLToPath(new URL("../media-harness/", import.meta.url));
@@ -52,7 +57,7 @@ export function createApplication(config: Config, roomOptions: OfficeRoomOptions
         if (stopping || (origin && !config.allowedOrigins.includes(origin))) return new Response(null, { status: 403 });
       },
     }),
-    rooms: { [OFFICE_ROOM]: defineRoom(createOfficeRoom(auth, config.officeId, offices, map, roomOptions, media)) },
+    rooms: { [OFFICE_ROOM]: defineRoom(createOfficeRoom(auth, config.officeId, offices, map, roomOptions, media, ai)) },
     express: (app) => {
       app.disable("x-powered-by");
       // Verify the exact raw body. Service callbacks bypass browser-origin and
@@ -66,6 +71,29 @@ export function createApplication(config: Config, roomOptions: OfficeRoomOptions
         await media.handleWebhook(event);
         res.sendStatus(204);
       });
+      // Worker endpoints are authenticated separately and never use guest credentials.
+      // They bypass browser CORS and the human request budget, but have strict bounded bodies.
+      app.use("/internal/ai", (req, _res, next) => {
+        if (stopping) throw new AIError("UNAVAILABLE");
+        if (req.headers.origin) throw new AIError("FORBIDDEN");
+        ai.authenticate(req.headers.authorization); next();
+      }, express.json({limit:"2mb", strict:true}));
+      app.post("/internal/ai/jobs/claim", async (req,res) => {
+        if (!aiWorkerClaimSchema.safeParse(req.body).success) throw new AIError("INVALID_INPUT");
+        res.json({job:await ai.claim()});
+      });
+      for (const operation of ["heartbeat","segments","complete","fail"] as const) {
+        app.post(`/internal/ai/jobs/:id/${operation}`, (req,res) => {
+          const schema = {heartbeat:aiWorkerLeaseSchema,segments:aiWorkerSegmentsSchema,complete:aiWorkerCompleteSchema,fail:aiWorkerFailSchema}[operation];
+          const parsed = schema.safeParse(req.body);
+          if (!parsed.success) throw new AIError("INVALID_INPUT","Invalid worker payload");
+          const data = parsed.data;
+          if (operation === "heartbeat") res.json(ai.heartbeat(req.params.id,data.leaseToken));
+          else if (operation === "segments") { ai.segments(req.params.id,data.leaseToken,(data as import("zod").infer<typeof aiWorkerSegmentsSchema>).segments); res.json({accepted:true}); }
+          else if (operation === "complete") res.json(ai.complete(req.params.id,data.leaseToken,(data as import("zod").infer<typeof aiWorkerCompleteSchema>).notes));
+          else { ai.fail(req.params.id,data.leaseToken,(data as import("zod").infer<typeof aiWorkerFailSchema>).code); res.json({accepted:true}); }
+        });
+      }
       app.use((req, res, next) => {
         const origin = req.headers.origin;
         if (origin && !config.allowedOrigins.includes(origin)) { res.status(403).json(errorBody("FORBIDDEN", "Origin is not allowed")); return; }
@@ -84,7 +112,7 @@ export function createApplication(config: Config, roomOptions: OfficeRoomOptions
       app.get("/readyz", (_req, res) => {
         let ready = false;
         try { ready = !stopping && storage.healthCheck(); } catch { /* storage unavailable */ }
-        res.status(ready ? 200 : 503).json({ status: ready ? "ready" : "not_ready", dependencies: { storage: ready ? "up" : "down", livekit: mediaStatus } });
+        res.status(ready ? 200 : 503).json({ status: ready ? "ready" : "not_ready", dependencies: { storage: ready ? "up" : "down", livekit: mediaStatus, ai: ai.workerStatus() } });
       });
       // Fresh seats originate here; Colyseus reconnect accepts only its reserved secret token.
       app.use("/api", (req, res, next) => {
@@ -102,6 +130,16 @@ export function createApplication(config: Config, roomOptions: OfficeRoomOptions
         next();
       });
       app.use(express.json({ limit: "4kb", strict: true }));
+      app.get("/api/notes", (req,res) => {
+        const identity=auth.authenticate(bearer(req.headers.authorization));
+        res.json({notes:ai.repo.notes(identity.userId)});
+      });
+      app.get("/api/notes/:id", (req,res) => {
+        const identity=auth.authenticate(bearer(req.headers.authorization));
+        const note=ai.repo.note(req.params.id,identity.userId);
+        if(!note) throw new AIError("NOT_FOUND");
+        res.json(note);
+      });
       app.post("/api/sessions/guest", (req, res) => res.status(201).json(auth.createGuest(req.body)));
       app.post("/api/media/token", async (req, res) => {
         const identity = auth.authenticate(bearer(req.headers.authorization));
@@ -125,6 +163,10 @@ export function createApplication(config: Config, roomOptions: OfficeRoomOptions
         res.json(seat);
       });
       const handleError: ErrorRequestHandler = (error, _req, res, _next) => {
+        if (error instanceof AIError) {
+          const status = error.code === "INVALID_INPUT" ? 400 : error.code === "UNAUTHORIZED" ? 401 : error.code === "FORBIDDEN" ? 403 : error.code === "NOT_FOUND" ? 404 : error.code === "STALE_CONSENT" ? 409 : 503;
+          res.status(status).json(errorBody(error.code,error.message)); return;
+        }
         if (error instanceof MediaError) {
           const status = { INVALID_INPUT: 400, UNAUTHORIZED: 401, FORBIDDEN: 403, UNAVAILABLE: 503, STALE_TRANSITION: 409, TRANSITION_PENDING: 409 }[error.code];
           res.status(status).json(errorBody(error.code, error.message)); return;
@@ -158,6 +200,8 @@ export function createApplication(config: Config, roomOptions: OfficeRoomOptions
     server,
     async start(port = config.port) {
       await server.listen(port, "0.0.0.0");
+      aiTimer = setInterval(() => { try { ai.tick(); } catch { log("ai.maintenance.failed"); } }, 1000);
+      aiTimer.unref();
       void checkMedia();
       mediaTimer = setInterval(() => void checkMedia(), 10_000);
       mediaTimer.unref();
@@ -172,6 +216,8 @@ export function createApplication(config: Config, roomOptions: OfficeRoomOptions
     async stop() {
       if (stopping) return;
       stopping = true;
+      if (aiTimer) clearInterval(aiTimer);
+      ai.shutdown();
       if (mediaTimer) clearInterval(mediaTimer);
       if (reconcileTimer) clearInterval(reconcileTimer);
       mediaAbort.abort();

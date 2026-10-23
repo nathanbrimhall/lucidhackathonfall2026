@@ -97,6 +97,7 @@ function project({ issued: _issued, stale: _stale, removals: _removals, ...bindi
  * so earlier tokens can only reach a room no current occupant is bound to.
  */
 export class LiveKitService {
+  private readonly assistants = new Map<string, string>();
   private readonly bindings = new Map<string, Seat>();
   private readonly identities = new Map<string, Seat>();
   private readonly roomNames = new Map<string, string>();
@@ -136,6 +137,21 @@ export class LiveKitService {
     this.bindings.set(sessionId, seat);
     this.identities.set(seat.mediaIdentity, seat);
     return seat.mediaIdentity;
+  }
+
+  /** Read-only assistant authorization, scoped to one consent revision and media epoch. */
+  async issueAssistant(roomName: string, identity: string, durationSeconds: number): Promise<string> {
+    if (this.disposed || !this.meetingRooms.has(roomName)) throw new MediaError("FORBIDDEN");
+    this.assistants.set(identity, roomName);
+    const token = new AccessToken(this.config.livekitApiKey, this.config.livekitApiSecret, { identity, name: "AI note taker", ttl: durationSeconds });
+    token.addGrant({ roomJoin: true, room: roomName, canPublish: false, canSubscribe: true, canPublishData: false, canUpdateOwnMetadata: false });
+    return token.toJwt();
+  }
+
+  async removeAssistant(identity: string): Promise<void> {
+    const room = this.assistants.get(identity);
+    this.assistants.delete(identity);
+    if (room) await this.backend.removeParticipant(room, identity);
   }
 
   getBinding(sessionId: string): Readonly<MediaBinding> | undefined {
@@ -240,7 +256,10 @@ export class LiveKitService {
     const roomName = event.room?.name;
     if (participant && roomName) {
       const binding = this.identities.get(participant.identity);
-      if (event.event === "participant_joined" || event.event === "track_published") {
+      const assistant = this.assistants.get(participant.identity) === roomName && !this.disposed;
+      if (assistant && event.event === "participant_joined") {
+        // Keep the authorized read-only assistant; normal bounded event dedup follows.
+      } else if (event.event === "participant_joined" || event.event === "track_published") {
         // Retired epochs are never a binding's room, so replayed tokens are evicted here too.
         if (binding && binding.roomName !== roomName && !this.disposed) {
           // Track the eviction as a pending removal so the seat cannot be issued (and
@@ -288,7 +307,7 @@ export class LiveKitService {
       }
       for (const identity of await this.backend.listParticipants!(room)) {
         if (this.disposed) return;
-        if (this.identities.get(identity)?.roomName !== room) await this.backend.removeParticipant(room, identity);
+        if (this.identities.get(identity)?.roomName !== room && this.assistants.get(identity) !== room) await this.backend.removeParticipant(room, identity);
       }
     }));
     if (results.some((result) => result.status === "rejected")) throw new MediaError("UNAVAILABLE");
@@ -311,7 +330,7 @@ export class LiveKitService {
     this.disposed = true;
     const roomIds = new Set([...this.roomNames.keys(), ...this.meetingRooms.values(), ...this.retiredRooms.values()]);
     const results = await Promise.allSettled([...roomIds].map((room) => this.cleanupRoom(room)));
-    this.events.clear();
+    this.events.clear(); this.assistants.clear();
     if (results.some((result) => result.status === "rejected")) throw new MediaError("UNAVAILABLE");
   }
 

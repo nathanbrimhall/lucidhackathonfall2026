@@ -100,6 +100,18 @@ export class Meetings {
     return change;
   }
 
+  /** A consent change retires every credential held by the previous assistant. */
+  rotate(zoneId: string): MeetingChange {
+    const session = this.sessions.get(zoneId);
+    const change: MeetingChange = { sessionId: "", transitions: [], retiredRooms: [], zones: [] };
+    if (!session) return change;
+    change.retiredRooms.push(session.roomName);
+    session.epoch++; session.roomName = `meet_${this.id()}`;
+    for (const sessionId of session.occupants) change.transitions.push({ sessionId, revision: this.bump(sessionId), mode: "meeting", zoneId,
+      meetingSessionId: session.meetingSessionId, roomName: session.roomName, reason: "epoch_rotation" });
+    return change;
+  }
+
   private depart(sessionId: string, zoneId: string, change: MeetingChange) {
     const session = this.sessions.get(zoneId)!;
     session.occupants.delete(sessionId);

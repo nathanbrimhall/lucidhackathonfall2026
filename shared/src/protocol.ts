@@ -1,7 +1,7 @@
 /** Public, renderer-independent application contract. Never export server credentials here. */
 export const PROTOCOL_VERSION = 1 as const;
 export const OFFICE_ROOM = "office";
-export const ERROR_CODES = ["INVALID_INPUT", "UNAUTHORIZED", "FORBIDDEN", "ROOM_FULL", "DUPLICATE_CONNECTION", "RATE_LIMITED", "INTERNAL_ERROR", "UNAVAILABLE", "STALE_TRANSITION", "TRANSITION_PENDING"] as const;
+export const ERROR_CODES = ["INVALID_INPUT", "UNAUTHORIZED", "FORBIDDEN", "ROOM_FULL", "DUPLICATE_CONNECTION", "RATE_LIMITED", "INTERNAL_ERROR", "UNAVAILABLE", "STALE_TRANSITION", "TRANSITION_PENDING", "AI_UNAVAILABLE", "STALE_CONSENT", "NOT_FOUND"] as const;
 export type ErrorCode = typeof ERROR_CODES[number];
 export interface RequestError { code: ErrorCode; message: string }
 export interface GuestIdentity {
@@ -74,7 +74,7 @@ export interface MeetingIndicator {
   occupancy: number;
   videoAvailable: boolean;
   videoCallActive: boolean;
-  assistantStatus: "none";
+  assistantStatus: "none" | AIStatusName;
 }
 
 /** JSON snapshot shape; live Colyseus clients expose players as a MapSchema. */
@@ -89,3 +89,23 @@ export interface OfficeState {
   /** Keyed by zoneId, present only while occupied. */
   meetings: Record<string, MeetingIndicator>;
 }
+
+
+export type AIStatusName = "requesting_consent" | "capturing" | "paused" | "processing" | "completed" | "canceled" | "failed";
+export interface AIStatus {
+  aiSessionId: string; meetingSessionId: string; revision: number; status: AIStatusName;
+  roster: { userId: string; displayName: string; consented: boolean }[];
+  error?: string;
+  /** Finalized speech excerpts available to the summary worker. */
+  committedSegments?: number;
+}
+export interface AIRequest { requestId: string }
+export interface AIConsent { aiSessionId: string; revision: number; consent: boolean }
+export interface AIStop { aiSessionId: string; revision: number }
+export interface NotesReady { noteId: string; aiSessionId: string }
+export interface DraftClaim { text: string; segmentIds: string[] }
+export interface DraftNotes {
+  summary: DraftClaim[]; decisions: DraftClaim[];
+  actionItems: (DraftClaim & { ownerUserId: string | null; dueAt: string | null })[];
+}
+export interface NoteRecord { id: string; aiSessionId: string; createdAt: string; partial: boolean; draft: DraftNotes }

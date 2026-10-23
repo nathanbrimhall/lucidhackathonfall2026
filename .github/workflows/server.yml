@@ -17,12 +17,37 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+      - run: docker build --target worker-runtime -t lucid-ai-worker:ci .
+      - name: Verify worker native RTC runtime
+        run: docker run --rm --entrypoint node lucid-ai-worker:ci --input-type=module -e 'const rtc = await import("@livekit/rtc-node"); const room = new rtc.Room(); await room.disconnect(); await rtc.dispose();'
       - run: cp .env.example .env
       - run: docker compose up --build -d --wait --wait-timeout 120
       - run: npm run smoke
       - run: npx playwright install --with-deps chromium
       - run: npm run smoke:media
+      - name: Start isolated LiveKit for synthetic AI media test
+        run: |
+          docker run -d --rm --name lucid-ai-smoke-ci \
+            -p 17880:17880/tcp -p 17881:17881/tcp -p 17882:17882/udp \
+            livekit/livekit-server:v1.13.10 --config-body '
+          port: 17880
+          rtc:
+            tcp_port: 17881
+            udp_port: 17882
+            node_ip: 127.0.0.1
+            use_external_ip: false
+          keys:
+            devkey: test-only-ai-smoke-secret-at-least-32-characters
+          logging:
+            level: warn'
+      - run: npm run smoke:ai-media
+        env:
+          AI_SMOKE_LIVEKIT_URL: ws://127.0.0.1:17880
+          AI_SMOKE_API_KEY: devkey
+          AI_SMOKE_API_SECRET: test-only-ai-smoke-secret-at-least-32-characters
       - if: failure()
         run: docker compose logs --no-color
       - if: always()
         run: docker compose down
+      - if: always()
+        run: docker rm -f lucid-ai-smoke-ci || true

@@ -1,18 +1,23 @@
 import { Client, type Room as OfficeRoom } from "@colyseus/sdk";
 import { Room, RoomEvent, Track, RemoteAudioTrack, DisconnectReason, setLogLevel, LogLevel } from "livekit-client";
-import { PROTOCOL_VERSION, type GuestIdentity, type GuestSession, type PlayerState, type AudioPolicy, type AudioMode, type MediaCredentials, type MediaTransition, type MeetingEntered, type MeetingExited } from "../../shared/src/protocol.js";
+import { PROTOCOL_VERSION, type GuestIdentity, type GuestSession, type PlayerState, type AudioPolicy, type AudioMode, type MediaCredentials, type MediaTransition, type MeetingEntered, type MeetingExited, type AIStatus, type NoteRecord, type DraftClaim } from "../../shared/src/protocol.js";
 import type { OfficeMap } from "../../shared/src/map-contract.js";
 
 type State = { players: { values(): IterableIterator<PlayerState> }; meetings?: { get(zoneId: string): { occupancy: number } | undefined } };
+type NoteItem = DraftClaim;
+type Note = NoteRecord;
+type NotesResponse = { notes: Note[] };
 const element = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const status = element("status"), mediaStatus = element("media-status"), policyText = element("policy"), meetingText = element("meeting");
 const canvas = element<HTMLCanvasElement>("map"), context = canvas.getContext("2d")!;
 const mic = element<HTMLButtonElement>("mic"), deafen = element<HTMLButtonElement>("deafen"), resume = element<HTMLButtonElement>("resume");
 const retryMedia = element<HTMLButtonElement>("retry-media"), audio = element<HTMLButtonElement>("audio"), republish = element<HTMLButtonElement>("republish"), leave = element<HTMLButtonElement>("leave");
+const aiRequest = element<HTMLButtonElement>("ai-request"), aiConsent = element<HTMLButtonElement>("ai-consent"), aiDecline = element<HTMLButtonElement>("ai-decline"), aiWithdraw = element<HTMLButtonElement>("ai-withdraw"), aiStop = element<HTMLButtonElement>("ai-stop");
 const storageKey = "media-harness.guest", preferenceKey = "media-harness.preferences";
 let token = sessionStorage.getItem(storageKey) ?? "", identity: GuestIdentity | undefined;
 let office: OfficeRoom<State> | undefined, media: Room | undefined, map: OfficeMap | undefined;
 let generation = 0, connecting = false, sequence = 0, revision = -1, micBusy = false;
+let meetingSessionId = "", aiState: AIStatus | undefined, localAIDecision: boolean | undefined, displayedConsentRevision = -1, displayedConsentSession = "", aiRequestPending = false;
 // target: the media room (mode/zone) this page expects; policies for any other target are ignored. mediaEpoch invalidates in-flight transition work.
 let target: { mode: AudioMode; zoneId: string } = { mode: "floor", zoneId: "" }, transitionRev = -1, mediaEpoch = 0, micIntent = false, lastPolicy: AudioPolicy | undefined, failed: MediaTransition | undefined;
 const intentional = new WeakSet<Room>(), delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
@@ -33,6 +38,14 @@ function controls() {
   mic.textContent = microphoneActive ? "Mute microphone" : (muted ? "Enable microphone" : "Re-enable microphone (saved on)");
   deafen.textContent = deafened ? "Undeafen" : "Deafen";
   element<HTMLButtonElement>("join").disabled = connecting || Boolean(office);
+  const inMeeting = Boolean(office && meetingSessionId);
+  aiRequest.disabled = !inMeeting || !media || aiRequestPending || Boolean(aiState && !["completed", "canceled", "failed"].includes(aiState.status));
+  const waiting = Boolean(aiState && ["requesting_consent", "paused"].includes(aiState.status));
+  aiConsent.disabled = !inMeeting || !waiting;
+  aiDecline.disabled = !inMeeting || !waiting;
+  const selfConsented = Boolean(aiState?.roster.some(person => person.userId === identity?.userId && person.consented));
+  aiWithdraw.disabled = !inMeeting || !aiState || !["capturing", "paused", "processing", "requesting_consent"].includes(aiState.status) || !selfConsented;
+  aiStop.disabled = !inMeeting || !aiState || !["capturing", "paused", "requesting_consent"].includes(aiState.status);
 }
 function preferences() { office?.send("media.preferences", { muted: !microphoneActive, deafened }); }
 async function request<T>(path: string, body?: unknown): Promise<T> {
@@ -51,7 +64,7 @@ function reconcile() {
 function detach(track: RemoteAudioTrack) { track.setVolume(0); for (const el of track.detach()) el.remove(); playing.get(track)?.element.remove(); playing.delete(track); }
 function stop(message: string) {
   generation++; mediaEpoch++; connecting = false; keys.clear(); gains.clear(); revision = -1;
-  target = { mode: "floor", zoneId: "" }; transitionRev = -1; micIntent = false; lastPolicy = undefined; failed = undefined; meetingText.textContent = "";
+  target = { mode: "floor", zoneId: "" }; transitionRev = -1; micIntent = false; lastPolicy = undefined; failed = undefined; meetingText.textContent = ""; meetingSessionId = ""; aiState = undefined; localAIDecision = undefined; aiRequestPending = false; renderAI();
   const oldOffice = office, oldMedia = media; office = undefined; media = undefined;
   microphoneActive = false; micBusy = false;
   for (const track of playing.keys()) detach(track);
@@ -59,6 +72,62 @@ function stop(message: string) {
   if (oldOffice) void oldOffice.leave().catch(() => {});
   status.textContent = message; mediaStatus.textContent = "Media stopped. Retry manually; microphone needs an explicit click.";
   policyText.textContent = "No active audio policy."; controls();
+}
+function addText(parent: HTMLElement, tag: keyof HTMLElementTagNameMap, value: unknown, className?: string) {
+  const node = document.createElement(tag); node.textContent = String(value ?? ""); if (className) node.className = className; parent.append(node); return node;
+}
+function renderAI() {
+  const statusNode = element("ai-status"), rosterNode = element("ai-roster");
+  statusNode.textContent = aiState ? `AI notes: ${aiState.status}${aiState.status === "capturing" ? ` · ${aiState.committedSegments ?? 0} speech excerpts transcribed` : ""}${aiState.error ? ` — ${aiState.error}` : ""}` : (meetingSessionId ? "AI notes have not been requested for this meeting." : "Enter a meeting room to request AI notes.");
+  rosterNode.replaceChildren();
+  if (aiState) {
+    if (displayedConsentRevision !== aiState.revision || displayedConsentSession !== aiState.aiSessionId) {
+      displayedConsentRevision = aiState.revision; displayedConsentSession = aiState.aiSessionId; localAIDecision = undefined;
+      element("ai-roster-note").textContent = "The consent revision changed. Review the current roster and make a new decision.";
+    }
+    for (const person of aiState.roster) addText(rosterNode, "li", `${person.displayName} — ${person.consented ? "consented" : "has not consented"}`);
+    if (!aiState.roster.length) addText(rosterNode, "li", "No participants reported.");
+    if (localAIDecision !== undefined) element("ai-roster-note").textContent = localAIDecision ? "You consented for this roster revision." : "You declined for this roster revision.";
+  } else element("ai-roster-note").textContent = "Every current occupant must decide for capture to begin. A roster change resets consent.";
+  controls();
+}
+function renderNote(note: Note) {
+  const article = document.createElement("article"); article.className = "note";
+  addText(article, "h3", `Draft note · ${new Date(note.createdAt).toLocaleString()}${note.partial ? " · partial" : ""}`);
+  const addSection = (title: string, entries: NoteItem[]) => {
+    addText(article, "h4", title);
+    const list = document.createElement("ul");
+    for (const entry of entries ?? []) {
+      const li = document.createElement("li"); li.textContent = entry.text;
+      if (entry.segmentIds?.length) addText(li, "small", `Sources: ${entry.segmentIds.join(", ")}`);
+      list.append(li);
+    }
+    if (!entries?.length) addText(list, "li", "None"); article.append(list);
+  };
+  addSection("Summary", note.draft.summary ?? []); addSection("Decisions", note.draft.decisions ?? []);
+  addSection("Action items", (note.draft.actionItems ?? []).map(item => ({ ...item, text: `${item.text}${item.ownerUserId ? ` · owner ${item.ownerUserId}` : " · owner unset"}${item.dueAt ? ` · due ${item.dueAt}` : " · due date unset"}` })));
+  return article;
+}
+async function loadNotes(openId?: string) {
+  const list = element("notes-list"), detail = element("note-detail");
+  list.textContent = "Loading notes…";
+  try {
+    const result = await request<NotesResponse>("/api/notes"); list.replaceChildren();
+    if (!result.notes?.length) addText(list, "p", "No notes available.");
+    for (const note of result.notes ?? []) {
+      const row = document.createElement("div"); row.className = "note-row";
+      addText(row, "span", `${new Date(note.createdAt).toLocaleString()}${note.partial ? " · partial" : ""}`);
+      const open = document.createElement("button"); open.type = "button"; open.textContent = "View draft"; open.onclick = () => void loadNotes(note.id); row.append(open); list.append(row);
+    }
+    if (openId) {
+      const note = await request<Note>(`/api/notes/${encodeURIComponent(openId)}`); detail.replaceChildren(renderNote(note));
+    }
+  } catch { list.textContent = "Could not load notes. Check your connection and try again."; if (openId) detail.textContent = "Could not load this note."; }
+}
+function decideAI(consent: boolean) {
+  if (!office || !aiState || !meetingSessionId || !["requesting_consent", "paused"].includes(aiState.status)) return;
+  office.send("ai.consent", { aiSessionId: aiState.aiSessionId, revision: aiState.revision, consent });
+  localAIDecision = consent; renderAI();
 }
 function renderPolicy() {
   const policy = lastPolicy; if (!policy || policy.mode !== target.mode || policy.zoneId !== target.zoneId) return;
@@ -156,15 +225,27 @@ async function connect() {
     if (attempt !== generation) { await candidate.leave(); return; }
     office = candidate; sequence = 0;
     candidate.onMessage("session.ready", () => {});
-    candidate.onMessage("request.error", () => { status.textContent = "Server rejected a request. Disconnect/retry if this persists."; });
+    candidate.onMessage("request.error", (error: {code?: string}) => {
+      if (attempt !== generation) return;
+      aiRequestPending = false;
+      status.textContent = `Server rejected a request${error.code ? ` (${error.code})` : ""}.`;
+      if (error.code === "AI_UNAVAILABLE") element("ai-status").textContent = "AI notes unavailable. Configure and start the AI worker.";
+      controls();
+    });
     candidate.onMessage("audio.policy", (policy: AudioPolicy) => {
       if (attempt !== generation || !Number.isSafeInteger(policy.revision) || policy.revision < revision || !Array.isArray(policy.speakers)) return;
       if (policy.mode !== target.mode || policy.zoneId !== target.zoneId) return;
       revision = policy.revision; lastPolicy = policy; renderPolicy();
     });
-    candidate.onMessage("meeting.entered", (m: MeetingEntered) => { if (attempt === generation) meetingText.textContent = `In ${String(m.name)} — private audio`; });
-    candidate.onMessage("meeting.exited", (_m: MeetingExited) => { if (attempt === generation) meetingText.textContent = "On the open floor — proximity audio"; });
+    candidate.onMessage("meeting.entered", (m: MeetingEntered) => { if (attempt === generation) { meetingText.textContent = `In ${String(m.name)} — private audio`; meetingSessionId = m.meetingSessionId; aiState = undefined; localAIDecision = undefined; aiRequestPending = false; renderAI(); } });
+    candidate.onMessage("meeting.exited", (_m: MeetingExited) => { if (attempt === generation) { meetingText.textContent = "On the open floor — proximity audio"; meetingSessionId = ""; aiState = undefined; localAIDecision = undefined; aiRequestPending = false; renderAI(); } });
     candidate.onMessage("media.transition", (t: MediaTransition) => { if (attempt === generation) void transition(t); });
+    candidate.onMessage("ai.status", (value: AIStatus) => {
+      if (attempt !== generation || !value || value.meetingSessionId !== meetingSessionId || !Number.isSafeInteger(value.revision) || !Array.isArray(value.roster)) return;
+      if (aiState && aiState.aiSessionId === value.aiSessionId && value.revision < aiState.revision) return;
+      aiState = value; aiRequestPending = false; renderAI();
+    });
+    candidate.onMessage("notes.ready", (value: { noteId: string; aiSessionId: string }) => { if (attempt === generation && value?.noteId) { void loadNotes(value.noteId); } });
     candidate.onDrop(() => { if (attempt === generation) stop("Office connection dropped. Media stopped; retry manually."); });
     candidate.onLeave(() => { if (attempt === generation) stop("Office disconnected. Retry manually (a held seat may need time to expire)."); });
     candidate.onError(() => { if (attempt === generation) stop("Office connection failed. Retry manually."); });
@@ -174,6 +255,7 @@ async function connect() {
     if (attempt !== generation) return;
     if (!credentials) return; // A media.transition arrived first and drives the connection.
     await attachMedia(attempt, epoch, credentials, false);
+    void loadNotes();
   } catch { if (attempt === generation) stop("Connection failed. Check invite/session, service configuration, and network; retry manually."); else void candidate?.leave().catch(() => {}); }
 }
 element<HTMLFormElement>("join-form").addEventListener("submit", event => { event.preventDefault(); void (async () => {
@@ -184,6 +266,12 @@ element<HTMLFormElement>("join-form").addEventListener("submit", event => { even
 })(); });
 retryMedia.onclick = () => { if (failed) void transition(failed); };
 resume.onclick = () => void connect(); leave.onclick = () => stop("Disconnected by you.");
+aiRequest.onclick = () => { if (!office || !meetingSessionId || !media || aiRequestPending) return; aiRequestPending = true; localAIDecision = undefined; renderAI(); office.send("ai.request", { requestId: crypto.randomUUID() }); element("ai-status").textContent = "Notes requested. Waiting for the current occupants to decide."; controls(); };
+aiConsent.onclick = () => decideAI(true);
+aiDecline.onclick = () => decideAI(false);
+aiWithdraw.onclick = () => { if (!office || !aiState) return; office.send("ai.consent", { aiSessionId: aiState.aiSessionId, revision: aiState.revision, consent: false }); localAIDecision = false; element("ai-status").textContent = "Consent withdrawn. Capture and pending processing will be canceled by the server."; renderAI(); };
+aiStop.onclick = () => { if (!office || !aiState) return; office.send("ai.stop", { aiSessionId: aiState.aiSessionId, revision: aiState.revision }); element("ai-status").textContent = "Stop requested. Authorized audio will be finalized into draft notes."; controls(); };
+element<HTMLButtonElement>("refresh-notes").onclick = () => void loadNotes();
 element("forget").onclick = () => { stop("Saved guest forgotten. Create a new guest to join."); token = ""; sessionStorage.removeItem(storageKey); controls(); };
 mic.onclick = () => { if (!media || micBusy) return; const current = media, attempt = generation; micBusy = true; controls(); void (async () => {
   try { await current.localParticipant.setMicrophoneEnabled(!microphoneActive); if (generation !== attempt) { for (const pub of current.localParticipant.trackPublications.values()) pub.track?.stop(); return; } microphoneActive = !microphoneActive; muted = !microphoneActive; savePreferences(); preferences(); mediaStatus.textContent = microphoneActive ? "Microphone on." : "Microphone muted."; }

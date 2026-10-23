@@ -18,3 +18,7 @@ const revision = z.number().int().safe().nonnegative();
 export const mediaTokenSchema = z.strictObject({ sessionId: z.string().min(1).max(128), transitionRevision: revision.optional() });
 export const mediaTransitionAckSchema = z.strictObject({ revision });
 export const mediaPreferencesSchema = z.strictObject({ muted: z.boolean(), deafened: z.boolean() });
+
+export const aiRequestSchema = z.strictObject({ requestId: z.string().uuid() });
+export const aiStopSchema = z.strictObject({ aiSessionId: z.string().uuid(), revision });
+export const aiConsentSchema = aiStopSchema.extend({ consent: z.boolean() });
