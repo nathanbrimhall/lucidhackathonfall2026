@@ -1,0 +1,60 @@
+name: lucidhackathonfall2026
+
+services:
+  data-init:
+    image: busybox:1.37.0
+    user: "0:0"
+    command: ["sh", "-c", "mkdir -p /data && chown -R 1000:1000 /data"]
+    volumes:
+      - office-data:/data
+    restart: "no"
+
+  migrate:
+    build:
+      context: .
+      target: server-runtime
+    env_file: .env
+    command: ["node", "dist/server/src/migrate.js"]
+    user: "1000:1000"
+    volumes:
+      - office-data:/data
+    depends_on:
+      data-init:
+        condition: service_completed_successfully
+    restart: "no"
+
+  server:
+    build:
+      context: .
+      target: server-runtime
+    env_file: .env
+    init: true
+    ports:
+      - "${PORT:-2567}:${PORT:-2567}"
+    volumes:
+      - office-data:/data
+    depends_on:
+      data-init:
+        condition: service_completed_successfully
+      migrate:
+        condition: service_completed_successfully
+      livekit:
+        condition: service_started
+    restart: unless-stopped
+    stop_grace_period: 15s
+
+  livekit:
+    image: livekit/livekit-server:v1.13.10
+    command: ["--config", "/etc/livekit.yaml"]
+    environment:
+      LIVEKIT_KEYS: "${LIVEKIT_API_KEY:-devkey}: ${LIVEKIT_API_SECRET:-devsecret-change-me-at-least-32-characters}"
+    ports:
+      - "7880:7880/tcp"
+      - "7881:7881/tcp"
+      - "7882:7882/udp"
+    volumes:
+      - ./deploy/livekit.yaml:/etc/livekit.yaml:ro
+    restart: unless-stopped
+
+volumes:
+  office-data:

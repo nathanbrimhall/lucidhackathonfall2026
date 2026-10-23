@@ -2,7 +2,9 @@
 
 Build a Gather.town-style virtual office where people can walk up to talk, invite an AI assistant into a conversation, get draft notes, and receive reminders. Use Colyseus for authoritative multiplayer state and self-hosted LiveKit for realtime audio. Package the application as hardware-agnostic containerized services for portable deployment. Keep the protocol independent of Phaser so backend development and testing can start immediately.
 
-This is a proposed implementation plan for a new server; the repository currently contains only a short project README. Defaults below are hackathon starting points, not measured capacity guarantees.
+This roadmap describes the server implementation plan. Defaults below are hackathon starting points, not measured capacity guarantees.
+
+**Implementation status (2026-10-23): M0 — Foundation is implemented.** The repository includes the pinned Colyseus starter foundation, validated configuration, shared protocol v1, SQLite identity migrations, resumable signed guest sessions, authenticated seat reservations, health routes, and Docker Compose with self-hosted LiveKit. See [README.md](README.md) for startup and API examples. M1 movement/presence and subsequent media/AI features remain planned.
 
 ## 1. Demo target and scope
 

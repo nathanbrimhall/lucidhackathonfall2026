@@ -1,0 +1,41 @@
+import { resolve } from "node:path";
+import { z } from "zod";
+
+const url = (protocols: string[]) => z.string().url().refine((value) => {
+  try {
+    const parsed = new URL(value);
+    return protocols.includes(parsed.protocol) && !parsed.username && !parsed.password && !parsed.hash && !parsed.search;
+  } catch { return false; }
+});
+const httpUrl = url(["http:", "https:"]);
+const envSchema = z.object({
+  PORT: z.coerce.number().int().min(1).max(65535).default(2567),
+  PUBLIC_SERVER_URL: httpUrl,
+  ALLOWED_ORIGINS: z.string().min(1).transform((value) => value.split(",").map((origin) => origin.trim())).pipe(z.array(httpUrl.refine((origin) => { try { return new URL(origin).origin === origin; } catch { return false; } })).min(1)),
+  SESSION_SECRET: z.string().min(32).max(1024),
+  DATABASE_URL: z.string().min(1).default("./data/office.sqlite"),
+  GUEST_INVITE_CODE: z.string().min(8).max(256),
+  OFFICE_ID: z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/).default("demo-office"),
+  LIVEKIT_INTERNAL_URL: httpUrl,
+  LIVEKIT_PUBLIC_URL: url(["ws:", "wss:"]),
+  LIVEKIT_API_KEY: z.string().regex(/^[a-zA-Z0-9_-]{3,128}$/),
+  LIVEKIT_API_SECRET: z.string().min(32).max(1024),
+});
+
+export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
+  const result = envSchema.safeParse(env);
+  if (!result.success) {
+    // Only field names: never include secret values or the full environment.
+    throw new Error(`Invalid configuration: ${[...new Set(result.error.issues.map((issue) => issue.path.join(".")))].join(", ")}`);
+  }
+  const e = result.data;
+  if (e.DATABASE_URL.includes("://")) throw new Error("Invalid configuration: DATABASE_URL must be a SQLite file path");
+  return {
+    port: e.PORT, publicServerUrl: e.PUBLIC_SERVER_URL, allowedOrigins: e.ALLOWED_ORIGINS,
+    sessionSecret: e.SESSION_SECRET, databasePath: e.DATABASE_URL === ":memory:" ? ":memory:" : resolve(e.DATABASE_URL),
+    inviteCode: e.GUEST_INVITE_CODE, officeId: e.OFFICE_ID,
+    livekitInternalUrl: e.LIVEKIT_INTERNAL_URL, livekitPublicUrl: e.LIVEKIT_PUBLIC_URL,
+    livekitApiKey: e.LIVEKIT_API_KEY, livekitApiSecret: e.LIVEKIT_API_SECRET,
+  };
+}
+export type Config = ReturnType<typeof loadConfig>;
