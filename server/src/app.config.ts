@@ -9,11 +9,15 @@ import { AuthError, AuthService } from "./auth/AuthService.js";
 import type { Config } from "./config.js";
 import { log } from "./log.js";
 import { openStorage } from "./repositories/Storage.js";
-import { createOfficeRoom } from "./rooms/OfficeRoom.js";
+import { createOfficeRoom, type OfficeRoomOptions } from "./rooms/OfficeRoom.js";
+import { OfficeRegistry, OfficeJoinError } from "./rooms/OfficeRegistry.js";
+import { loadOfficeMap } from "./domain/map.js";
 
-export function createApplication(config: Config) {
+export function createApplication(config: Config, roomOptions: OfficeRoomOptions = {}) {
+  const map = loadOfficeMap();
   const storage = openStorage(config.databasePath);
   const auth = new AuthService(storage, config);
+  const offices = new OfficeRegistry();
   const httpServer = createServer();
   let stopping = false;
   let mediaStatus: "unknown" | "up" | "down" = "unknown";
@@ -24,7 +28,7 @@ export function createApplication(config: Config) {
 
   // Colyseus routes run before Express. Disable its public matchmaking methods
   // at the supported controller boundary; internal matchMaker calls still work.
-  matchMaker.controller.exposedMethods = [];
+  matchMaker.controller.exposedMethods = ["reconnect"];
   matchMaker.controller.getCorsHeaders = (headers) => ({
     "Access-Control-Allow-Origin": config.allowedOrigins.includes(headers.get("origin") ?? "") ? headers.get("origin")! : "null",
     "Access-Control-Allow-Credentials": "false",
@@ -42,7 +46,7 @@ export function createApplication(config: Config) {
         if (stopping || (origin && !config.allowedOrigins.includes(origin))) return new Response(null, { status: 403 });
       },
     }),
-    rooms: { [OFFICE_ROOM]: defineRoom(createOfficeRoom(auth, config.officeId)) },
+    rooms: { [OFFICE_ROOM]: defineRoom(createOfficeRoom(auth, config.officeId, offices, map, roomOptions)) },
     express: (app) => {
       app.disable("x-powered-by");
       app.use((req, res, next) => {
@@ -64,7 +68,7 @@ export function createApplication(config: Config) {
         try { ready = !stopping && storage.healthCheck(); } catch { /* storage unavailable */ }
         res.status(ready ? 200 : 503).json({ status: ready ? "ready" : "not_ready", dependencies: { storage: ready ? "up" : "down", livekit: mediaStatus } });
       });
-      // All seats originate in our authenticated application route. M1 adds reconnect support.
+      // Fresh seats originate here; Colyseus reconnect accepts only its reserved secret token.
       app.use("/api", (req, res, next) => {
         if (stopping) { res.status(503).json(errorBody("UNAVAILABLE", "Server is shutting down")); return; }
         const now = Date.now();
@@ -82,16 +86,24 @@ export function createApplication(config: Config) {
       app.use(express.json({ limit: "4kb", strict: true }));
       app.post("/api/sessions/guest", (req, res) => res.status(201).json(auth.createGuest(req.body)));
       app.get("/api/sessions/current", (req, res) => res.json(auth.authenticate(bearer(req.headers.authorization))));
+      app.get("/api/offices/:officeId/map", (req, res) => {
+        const identity = auth.authenticate(bearer(req.headers.authorization));
+        if (req.params.officeId !== identity.officeId) throw new AuthError("FORBIDDEN", "Office membership required");
+        res.json(map);
+      });
       app.post("/api/offices/:officeId/join", async (req, res) => {
         const token = bearer(req.headers.authorization);
         const identity = auth.authenticate(token);
         if (req.params.officeId !== identity.officeId) throw new AuthError("FORBIDDEN", "Office membership required");
         const parsed = joinOfficeSchema.safeParse(req.body);
         if (!parsed.success) throw new AuthError("INVALID_INPUT", `Expected protocolVersion ${PROTOCOL_VERSION}`);
-        const seat = await matchMaker.joinOrCreate(OFFICE_ROOM, parsed.data, { token, headers: new Headers(), ip: req.socket.remoteAddress });
+        const seat = await offices.reserve(identity.userId, parsed.data, { token, headers: new Headers(), ip: req.socket.remoteAddress });
         res.json(seat);
       });
       const handleError: ErrorRequestHandler = (error, _req, res, _next) => {
+        if (error instanceof OfficeJoinError) {
+          res.status(409).json(errorBody(error.code, error.message)); return;
+        }
         if (error instanceof AuthError) {
           const status = { INVALID_INPUT: 400, UNAUTHORIZED: 401, FORBIDDEN: 403 }[error.code];
           res.status(status).json(errorBody(error.code, error.message)); return;

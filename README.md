@@ -1,6 +1,6 @@
 # Lucid Virtual Office
 
-A virtual office where people can walk up to conversations, with AI notes and reminders planned for later milestones. M0 provides guest sessions, an authenticated Colyseus seat reservation, health endpoints, and SQLite persistence. Presence and movement arrive in M1; the AI worker is deferred until M4.
+A virtual office where people can walk up to conversations, with AI notes and reminders planned for later milestones. M1 provides guest sessions, authenticated office seats, synchronized presence, and server-authoritative movement with map collision. The AI worker is deferred until M4.
 
 ## Run with Docker Compose
 
@@ -93,13 +93,34 @@ const room = await client.consumeSeatReservation(reservation);
 room.onMessage("session.ready", (identity) => console.log("Joined office", identity));
 ```
 
-The server disables Colyseus's public matchmaking endpoints. Clients must use the authenticated application join route above; do not call `joinOrCreate` directly. M0 validates the session, reserves the seat, and emits `session.ready`. It does not yet synchronize player presence or movement. Application HTTP errors use `{ "error": { "code": "...", "message": "..." } }`.
+The server blocks public matchmaking for new joins; its private reconnect route remains available to the SDK. M1 validates the session, reserves a seat, emits `session.ready`, and synchronizes players keyed by Colyseus `sessionId`. Movement messages contain only `{ seq, dx, dy }`; the server applies speed, elapsed time, map bounds, and collision. Clients may send `{ status: "available" | "away" | "busy" }`. Invalid messages receive `request.error` with a stable error code. Application HTTP errors use `{ "error": { "code": "...", "message": "..." } }`.
+
+An office join returns HTTP `409` with `DUPLICATE_CONNECTION` when that guest already has a reserved or active seat, or `ROOM_FULL` when all 20 seats are occupied. Keep the SDK's `room.reconnectionToken` to resume a dropped connection within 30 seconds, then continue sequence numbers from `lastProcessedInputSeq`:
+
+```ts
+persistSecurely(room.reconnectionToken);
+const resumedRoom = await client.reconnect(loadSecurelySavedReconnectToken());
+let nextSeq = (resumedRoom.state.players.get(resumedRoom.sessionId)?.lastProcessedInputSeq ?? -1) + 1;
+resumedRoom.send("player.input", { seq: nextSeq++, dx: 1, dy: 0 });
+```
+
+Room state is in memory, so after a server restart use the saved guest bearer token to request a fresh office seat and begin a new room session.
+
+Fetch the versioned map contract for the authenticated office with `GET /api/offices/:officeId/map`, using the guest bearer token. The M1 office simulation runs at 20 Hz with 20 Hz state patches, expires held input after 250 ms, and accepts up to 60 application messages per second per client. Colyseus reconnection reservations last 30 seconds.
+
+Example movement and status messages:
+
+```ts
+room.send("player.input", { seq: 1, dx: 1, dy: 0 });
+room.send("player.status", { status: "busy" });
+room.onMessage("request.error", ({ code, message }) => console.warn(code, message));
+```
 
 ## Runtime and shared access
 
 The checked-in URLs are for local development. For browser access from other devices, set `PUBLIC_SERVER_URL`, `ALLOWED_ORIGINS`, and `LIVEKIT_PUBLIC_URL` to externally reachable addresses and use HTTPS/WSS with a trusted certificate. Other devices cannot use `localhost` to reach the host. The sample maps LiveKit signaling TCP `7880`, ICE/TCP `7881`, and single-port ICE/UDP `7882`; a signaling proxy alone does not carry WebRTC media. Configure reachable advertised addresses, firewall/router forwarding, and TURN for the deployment network as needed.
 
-SQLite lives at `/data/office.sqlite` in the Compose volume and at the configured path for local Node runs. Back up the database before moving it to another host; images do not contain application data. Run one server replica while office state is in memory and SQLite is the application store. Compose currently includes the server, migration and volume initialization jobs, and LiveKit; there is no worker container in M0.
+SQLite lives at `/data/office.sqlite` in the Compose volume and at the configured path for local Node runs. Back up the database before moving it to another host; images do not contain application data. Run one server replica while office state is in memory and SQLite is the application store. Compose currently includes the server, migration and volume initialization jobs, and LiveKit; there is no worker container yet.
 
 ## Pinned Colyseus versions
 
@@ -119,3 +140,7 @@ The server foundation follows the TypeScript minimal starter from [`create-colys
 Validated on October 23, 2026: TypeScript checks and build, 31 tests, Compose startup with usable SQLite and LiveKit, SDK seat consumption and schema decoding, rejection of unauthorized joins, durable guest identity after container replacement, non-root execution, and graceful SIGTERM shutdown. Application images built and passed the SDK smoke check on native Linux arm64 and emulated Linux amd64. This verifies the M0 foundation; browser audio and cross-device media are later milestones.
 
 The GitHub Actions workflow runs the type checks, tests, build, Compose startup, and SDK smoke check on pushes and pull requests. Run it locally with `npm run typecheck`, `npm test`, `npm run build`, `docker compose up --build -d --wait`, and `npm run smoke`.
+
+## M1 verification
+
+M1 validation covers strict input/status contracts, map contract and collision behavior, authenticated seat handling, reconnect reservations and authorization rechecks, duplicate guest seats, and full-room rejection. All 73 tests, TypeScript checks, and the build passed. The server Docker image built successfully, and the isolated runtime SDK smoke passed with two distinct guests in the same office instance, shared presence, movement observed by the second client, rejected client coordinate injection, and graceful client leaves. A separate SDK check synchronized 20 clients in the default-capacity office, observed movement, and confirmed that a 21st guest received `ROOM_FULL`.

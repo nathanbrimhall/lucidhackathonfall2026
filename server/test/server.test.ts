@@ -67,7 +67,10 @@ describe("M0 HTTP and WebSocket foundation", () => {
         const timer = setTimeout(() => reject(new Error("Timed out waiting for schema state")), 2000);
         room.onStateChange.once(() => { clearTimeout(timer); resolve(); });
       });
-      expect(room.state.toJSON()).toEqual({ officeId: "demo-office", protocolVersion: 1 });
+      const state = room.state.toJSON();
+      expect(state).toMatchObject({ officeId: "demo-office", protocolVersion: 1, mapId: "office", mapVersion: 1 });
+      expect(JSON.stringify(state)).not.toContain(token);
+      expect(state).toHaveProperty(`players.${room.sessionId}.userId`, userId);
     } finally { await room.leave(); }
   });
   it("rejects malformed, oversized requests and unauthorized browser origins", async () => {
