@@ -1,7 +1,10 @@
 name: lucidhackathonfall2026
 
-# Run from the repository root. The application images are pulled from a
-# registry; LiveKit remains the pinned official image from compose.yaml.
+# Run from the repository root with `--env-file .env`. Compose interpolates
+# ${...} from the project directory (deploy/), not the root .env that env_file
+# loads, so without it LiveKit and the worker would not see the root secrets.
+# The application images are pulled from a registry; LiveKit remains the
+# pinned official image from compose.yaml.
 services:
   data-init:
     image: busybox:1.37.0
@@ -73,8 +76,9 @@ services:
     image: livekit/livekit-server:v1.13.10
     command: ["--config", "/etc/livekit.yaml"]
     environment:
-      LIVEKIT_KEYS: "${LIVEKIT_API_KEY:-devkey}: ${LIVEKIT_API_SECRET:-devsecret-change-me-at-least-32-characters}"
-      LIVEKIT_WEBHOOK_API_KEY: "${LIVEKIT_API_KEY:-devkey}"
+      # No development fallbacks: a missing value must fail rather than diverge from the server's keys.
+      LIVEKIT_KEYS: "${LIVEKIT_API_KEY:?Pass --env-file .env}: ${LIVEKIT_API_SECRET:?Pass --env-file .env}"
+      LIVEKIT_WEBHOOK_API_KEY: "${LIVEKIT_API_KEY:?Pass --env-file .env}"
     ports:
       - "7880:7880/tcp"
       - "7881:7881/tcp"

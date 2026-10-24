@@ -79,16 +79,16 @@ The archive and image are separate deployment artifacts. Copying or pulling the 
 
 ## Image-only deployment on another host
 
-The example [image-only Compose file](../deploy/compose.images.yaml) uses `SERVER_IMAGE` for both the server and migration job and `WORKER_IMAGE` for the optional AI worker. Compose requires both image variables to be set even when the `ai` profile is not started; the worker container itself starts only with `--profile ai`. The file reads runtime settings from the repository-root `.env` file. Run it from the repository root so `../.env` and the LiveKit config bind mount resolve correctly. Set both image references to a published version tag or, preferably for a recorded demo, an immutable digest:
+The example [image-only Compose file](../deploy/compose.images.yaml) uses `SERVER_IMAGE` for both the server and migration job and `WORKER_IMAGE` for the optional AI worker. Compose requires both image variables to be set even when the `ai` profile is not started; the worker container itself starts only with `--profile ai`. The file reads runtime settings from the repository-root `.env` file. Run it from the repository root so `../.env` and the LiveKit config bind mount resolve correctly, and pass `--env-file .env`: Compose otherwise interpolates `${...}` values (LiveKit keys, worker secret, `PORT`) from `deploy/`, and LiveKit would refuse to start without its keys. Set both image references to a published version tag or, preferably for a recorded demo, an immutable digest:
 
 ```sh
 SERVER_IMAGE=registry.example/lucid/server:release \
 WORKER_IMAGE=registry.example/lucid/worker:release \
-docker compose --profile ai -f deploy/compose.images.yaml pull
+docker compose --env-file .env --profile ai -f deploy/compose.images.yaml pull
 
 SERVER_IMAGE=registry.example/lucid/server:release \
 WORKER_IMAGE=registry.example/lucid/worker:release \
-docker compose --profile ai -f deploy/compose.images.yaml up -d --wait
+docker compose --env-file .env --profile ai -f deploy/compose.images.yaml up -d --wait
 ```
 
 Replace the example image references with the registry and digest published for the release. Set the same references on each command or export them in the shell. Configure `.env` on the host with its own secrets and externally reachable addresses. Use a distinct database volume on a new host and restore a consistent archive only when the demo needs the existing guest/reminder state. Keep the worker secret distinct from the session and LiveKit secrets; the worker receives no SQLite volume.
