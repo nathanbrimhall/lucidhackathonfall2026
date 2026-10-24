@@ -4,6 +4,29 @@ on:
   pull_request:
 
 jobs:
+  native-runtime:
+    name: Native SQLite and RTC (${{ matrix.runner }})
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build --target worker-runtime -t lucid-office:native-check .
+      - name: Verify production migrations and native modules as runtime user
+        run: |
+          docker run --rm --entrypoint node lucid-office:native-check --input-type=module -e '
+            import { openStorage } from "./dist/server/src/repositories/Storage.js";
+            const storage = openStorage(":memory:");
+            if (!storage.healthCheck()) throw new Error("Storage unavailable");
+            storage.db.prepare("SELECT count(*) FROM notification_outbox").get();
+            storage.close();
+            const rtc = await import("@livekit/rtc-node");
+            const room = new rtc.Room();
+            await room.disconnect();
+            await rtc.dispose();'
   foundation:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -24,6 +47,14 @@ jobs:
       - run: docker compose up --build -d --wait --wait-timeout 120
       - run: npm run smoke
       - run: npx playwright install --with-deps chromium
+      - name: Confirm offline reminder before container replacement
+        run: npm run smoke:reminders -- seed "$RUNNER_TEMP/reminder-smoke.json"
+      - name: Replace application while retaining its data volume
+        run: docker compose up -d --force-recreate --no-deps --wait --wait-timeout 60 server
+      - name: Verify durable reminder and browser deduplication
+        run: npm run smoke:reminders -- verify "$RUNNER_TEMP/reminder-smoke.json"
+      - if: always()
+        run: rm -f "$RUNNER_TEMP/reminder-smoke.json"
       - run: npm run smoke:media
       - name: Start isolated LiveKit for synthetic AI media test
         run: |

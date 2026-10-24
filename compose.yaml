@@ -15,6 +15,7 @@ services:
       target: server-runtime
     env_file: .env
     environment:
+      DATABASE_URL: /data/office.sqlite
       OPENAI_API_KEY: ""
     command: ["node", "dist/server/src/migrate.js"]
     user: "1000:1000"
@@ -31,6 +32,7 @@ services:
       target: server-runtime
     env_file: .env
     environment:
+      DATABASE_URL: /data/office.sqlite
       OPENAI_API_KEY: ""
     init: true
     ports:

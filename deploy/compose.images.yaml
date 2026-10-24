@@ -1,0 +1,87 @@
+name: lucidhackathonfall2026
+
+# Run from the repository root. The application images are pulled from a
+# registry; LiveKit remains the pinned official image from compose.yaml.
+services:
+  data-init:
+    image: busybox:1.37.0
+    user: "0:0"
+    command: ["sh", "-c", "mkdir -p /data && chown -R 1000:1000 /data"]
+    volumes:
+      - office-data:/data
+    restart: "no"
+
+  migrate:
+    image: ${SERVER_IMAGE:?Set SERVER_IMAGE to a published server image tag or digest}
+    env_file: ../.env
+    environment:
+      DATABASE_URL: /data/office.sqlite
+      OPENAI_API_KEY: ""
+    command: ["node", "dist/server/src/migrate.js"]
+    user: "1000:1000"
+    volumes:
+      - office-data:/data
+    depends_on:
+      data-init:
+        condition: service_completed_successfully
+    restart: "no"
+
+  server:
+    image: ${SERVER_IMAGE:?Set SERVER_IMAGE to a published server image tag or digest}
+    env_file: ../.env
+    environment:
+      DATABASE_URL: /data/office.sqlite
+      OPENAI_API_KEY: ""
+    init: true
+    ports:
+      - "${PORT:-2567}:${PORT:-2567}"
+    volumes:
+      - office-data:/data
+    depends_on:
+      data-init:
+        condition: service_completed_successfully
+      migrate:
+        condition: service_completed_successfully
+      livekit:
+        condition: service_started
+    restart: unless-stopped
+    stop_grace_period: 15s
+
+  worker:
+    profiles: ["ai"]
+    image: ${WORKER_IMAGE:?Set WORKER_IMAGE to a published worker image tag or digest}
+    environment:
+      AI_SERVER_URL: http://server:${PORT:-2567}
+      AI_WORKER_SECRET: "${AI_WORKER_SECRET:-}"
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+      AI_PROVIDER_BASE_URL: "${AI_PROVIDER_BASE_URL:-https://api.openai.com/v1}"
+      AI_TRANSCRIPTION_MODEL: "${AI_TRANSCRIPTION_MODEL:-gpt-4o-mini-transcribe}"
+      AI_SUMMARY_MODEL: "${AI_SUMMARY_MODEL:-gpt-4o-mini}"
+      AI_CHUNK_SECONDS: "${AI_CHUNK_SECONDS:-10}"
+      AI_PROVIDER_TIMEOUT_MS: "${AI_PROVIDER_TIMEOUT_MS:-30000}"
+      AI_MAX_TRANSCRIPT_CHARS: "${AI_MAX_TRANSCRIPT_CHARS:-100000}"
+    init: true
+    depends_on:
+      server:
+        condition: service_healthy
+      livekit:
+        condition: service_started
+    restart: unless-stopped
+    stop_grace_period: 15s
+
+  livekit:
+    image: livekit/livekit-server:v1.13.10
+    command: ["--config", "/etc/livekit.yaml"]
+    environment:
+      LIVEKIT_KEYS: "${LIVEKIT_API_KEY:-devkey}: ${LIVEKIT_API_SECRET:-devsecret-change-me-at-least-32-characters}"
+      LIVEKIT_WEBHOOK_API_KEY: "${LIVEKIT_API_KEY:-devkey}"
+    ports:
+      - "7880:7880/tcp"
+      - "7881:7881/tcp"
+      - "7882:7882/udp"
+    volumes:
+      - ./livekit.yaml:/etc/livekit.yaml:ro
+    restart: unless-stopped
+
+volumes:
+  office-data:

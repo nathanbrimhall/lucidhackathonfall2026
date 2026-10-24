@@ -18,6 +18,8 @@ import { AIRepository } from "./repositories/AIRepository.js";
 import { AISessionService, AIError } from "./services/AISessionService.js";
 import { aiWorkerClaimSchema, aiWorkerLeaseSchema, aiWorkerSegmentsSchema, aiWorkerCompleteSchema, aiWorkerFailSchema } from "../../shared/src/ai-worker.js";
 import { LiveKitService, MediaError } from "./services/LiveKitService.js";
+import { ReminderRepository } from "./repositories/ReminderRepository.js";
+import { ReminderService, ReminderError } from "./services/ReminderService.js";
 
 export function createApplication(config: Config, roomOptions: OfficeRoomOptions = {}, media = new LiveKitService(config)) {
   const map = loadOfficeMap();
@@ -25,11 +27,13 @@ export function createApplication(config: Config, roomOptions: OfficeRoomOptions
   const auth = new AuthService(storage, config);
   const offices = new OfficeRegistry();
   const ai = new AISessionService(new AIRepository(storage), config, media);
+  const reminders = new ReminderService(new ReminderRepository(storage));
   const httpServer = createServer();
   let stopping = false;
   let mediaStatus: "unknown" | "up" | "down" = "unknown";
   let mediaTimer: NodeJS.Timeout | undefined;
   let aiTimer: NodeJS.Timeout | undefined;
+  let reminderTimer: NodeJS.Timeout | undefined;
   let reconcileTimer: NodeJS.Timeout | undefined;
   const mediaAbort = new AbortController();
   const compiledHarness = fileURLToPath(new URL("../media-harness/", import.meta.url));
@@ -57,7 +61,7 @@ export function createApplication(config: Config, roomOptions: OfficeRoomOptions
         if (stopping || (origin && !config.allowedOrigins.includes(origin))) return new Response(null, { status: 403 });
       },
     }),
-    rooms: { [OFFICE_ROOM]: defineRoom(createOfficeRoom(auth, config.officeId, offices, map, roomOptions, media, ai)) },
+    rooms: { [OFFICE_ROOM]: defineRoom(createOfficeRoom(auth, config.officeId, offices, map, roomOptions, media, ai, reminders)) },
     express: (app) => {
       app.disable("x-powered-by");
       // Verify the exact raw body. Service callbacks bypass browser-origin and
@@ -101,7 +105,7 @@ export function createApplication(config: Config, roomOptions: OfficeRoomOptions
           res.setHeader("Access-Control-Allow-Origin", origin);
           res.vary("Origin");
           res.setHeader("Access-Control-Allow-Headers", "Authorization, Content-Type");
-          res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+          res.setHeader("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS");
         }
         res.setHeader("Cache-Control", "no-store");
         if (req.method === "OPTIONS") { res.sendStatus(204); return; }
@@ -130,6 +134,20 @@ export function createApplication(config: Config, roomOptions: OfficeRoomOptions
         next();
       });
       app.use(express.json({ limit: "4kb", strict: true }));
+      app.get("/api/reminders", (req, res) => {
+        const identity = auth.authenticate(bearer(req.headers.authorization));
+        if (req.query.before !== undefined && typeof req.query.before !== "string") throw new ReminderError("INVALID_INPUT", "Expected a reminder cursor");
+        const page = reminders.list(identity.userId, identity.officeId, req.query.before);
+        res.json({ reminders: page, nextCursor: page.length === 100 ? page.at(-1)!.id : null });
+      });
+      app.post("/api/reminders", (req, res) => {
+        const identity = auth.authenticate(bearer(req.headers.authorization));
+        res.status(201).json(reminders.create(identity.userId, identity.officeId, req.body));
+      });
+      app.patch("/api/reminders/:id", (req, res) => {
+        const identity = auth.authenticate(bearer(req.headers.authorization));
+        res.json(reminders.update(identity.userId, identity.officeId, req.params.id, req.body));
+      });
       app.get("/api/notes", (req,res) => {
         const identity=auth.authenticate(bearer(req.headers.authorization));
         res.json({notes:ai.repo.notes(identity.userId)});
@@ -163,6 +181,10 @@ export function createApplication(config: Config, roomOptions: OfficeRoomOptions
         res.json(seat);
       });
       const handleError: ErrorRequestHandler = (error, _req, res, _next) => {
+        if (error instanceof ReminderError) {
+          const status = error.code === "INVALID_INPUT" ? 400 : error.code === "FORBIDDEN" ? 403 : error.code === "NOT_FOUND" ? 404 : error.code === "CONFLICT" ? 409 : 503;
+          res.status(status).json(errorBody(error.code, error.message)); return;
+        }
         if (error instanceof AIError) {
           const status = error.code === "INVALID_INPUT" ? 400 : error.code === "UNAUTHORIZED" ? 401 : error.code === "FORBIDDEN" ? 403 : error.code === "NOT_FOUND" ? 404 : error.code === "STALE_CONSENT" ? 409 : 503;
           res.status(status).json(errorBody(error.code,error.message)); return;
@@ -202,6 +224,10 @@ export function createApplication(config: Config, roomOptions: OfficeRoomOptions
       await server.listen(port, "0.0.0.0");
       aiTimer = setInterval(() => { try { ai.tick(); } catch { log("ai.maintenance.failed"); } }, 1000);
       aiTimer.unref();
+      const scheduleReminders = () => { try { reminders.tick(); } catch { log("reminders.maintenance.failed"); } };
+      scheduleReminders();
+      reminderTimer = setInterval(scheduleReminders, 1000);
+      reminderTimer.unref();
       void checkMedia();
       mediaTimer = setInterval(() => void checkMedia(), 10_000);
       mediaTimer.unref();
@@ -217,6 +243,8 @@ export function createApplication(config: Config, roomOptions: OfficeRoomOptions
       if (stopping) return;
       stopping = true;
       if (aiTimer) clearInterval(aiTimer);
+      if (reminderTimer) clearInterval(reminderTimer);
+      reminders.shutdown();
       ai.shutdown();
       if (mediaTimer) clearInterval(mediaTimer);
       if (reconcileTimer) clearInterval(reconcileTimer);

@@ -2,11 +2,15 @@ import { Client, type Room as OfficeRoom } from "@colyseus/sdk";
 import { Room, RoomEvent, Track, RemoteAudioTrack, DisconnectReason, setLogLevel, LogLevel } from "livekit-client";
 import { PROTOCOL_VERSION, type GuestIdentity, type GuestSession, type PlayerState, type AudioPolicy, type AudioMode, type MediaCredentials, type MediaTransition, type MeetingEntered, type MeetingExited, type AIStatus, type NoteRecord, type DraftClaim } from "../../shared/src/protocol.js";
 import type { OfficeMap } from "../../shared/src/map-contract.js";
+import { toLocalInput, wallTimeToIso } from "./reminder-time.js";
 
 type State = { players: { values(): IterableIterator<PlayerState> }; meetings?: { get(zoneId: string): { occupancy: number } | undefined } };
 type NoteItem = DraftClaim;
 type Note = NoteRecord;
 type NotesResponse = { notes: Note[] };
+type Reminder = { id: string; text: string; dueAt: string; timezone: string; status: "scheduled" | "due" | "acknowledged" | "canceled"; revision: number; createdAt: string; updatedAt: string; source?: { noteId: string; actionItemIndex: number } };
+type ReminderNotice = { notificationId: string; reminder: Reminder; receivedAt: string };
+type ReminderRequest = { requestId: string; text?: string; dueAt?: string; timezone?: string; status?: "canceled"; revision?: number; source?: { noteId: string; actionItemIndex: number } };
 const element = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const status = element("status"), mediaStatus = element("media-status"), policyText = element("policy"), meetingText = element("meeting");
 const canvas = element<HTMLCanvasElement>("map"), context = canvas.getContext("2d")!;
@@ -18,6 +22,7 @@ let token = sessionStorage.getItem(storageKey) ?? "", identity: GuestIdentity | 
 let office: OfficeRoom<State> | undefined, media: Room | undefined, map: OfficeMap | undefined;
 let generation = 0, connecting = false, sequence = 0, revision = -1, micBusy = false;
 let meetingSessionId = "", aiState: AIStatus | undefined, localAIDecision: boolean | undefined, displayedConsentRevision = -1, displayedConsentSession = "", aiRequestPending = false;
+let reminders: Reminder[] = [], remindersNextCursor: string | null = null, reminderListLoading = false, notices: ReminderNotice[] = [], noticeIds = new Set<string>(), reminderRequest: { method: "POST" | "PATCH"; path: string; body: ReminderRequest } | undefined, editingReminderId = "", reminderSource: { noteId: string; actionItemIndex: number } | undefined, reminderBusy = false, reminderRefreshTimer: ReturnType<typeof setTimeout> | undefined;
 // target: the media room (mode/zone) this page expects; policies for any other target are ignored. mediaEpoch invalidates in-flight transition work.
 let target: { mode: AudioMode; zoneId: string } = { mode: "floor", zoneId: "" }, transitionRev = -1, mediaEpoch = 0, micIntent = false, lastPolicy: AudioPolicy | undefined, failed: MediaTransition | undefined;
 const intentional = new WeakSet<Room>(), delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
@@ -48,10 +53,119 @@ function controls() {
   aiStop.disabled = !inMeeting || !aiState || !["capturing", "paused", "requesting_consent"].includes(aiState.status);
 }
 function preferences() { office?.send("media.preferences", { muted: !microphoneActive, deafened }); }
-async function request<T>(path: string, body?: unknown): Promise<T> {
-  const response = await fetch(path, { method: body === undefined ? "GET" : "POST", headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+async function request<T>(path: string, body?: unknown, method?: "POST" | "PATCH"): Promise<T> {
+  const response = await fetch(path, { method: method ?? (body === undefined ? "GET" : "POST"), headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
   if (!response.ok) { let code = ""; try { code = String(((await response.json()) as { error?: { code?: unknown } }).error?.code ?? ""); } catch { /* No JSON error body. */ } throw new HttpError(response.status, code); }
   return await response.json() as T;
+}
+const validTimezone = (timezone: string) => { try { new Intl.DateTimeFormat("en-US", { timeZone: timezone }); return true; } catch { return false; } };
+const isReminder = (value: unknown): value is Reminder => {
+  if (!value || typeof value !== "object") return false;
+  const r = value as Reminder;
+  return typeof r.id === "string" && typeof r.text === "string" && typeof r.dueAt === "string" && /(?:Z|[+-]\d{2}:\d{2})$/.test(r.dueAt) && Number.isFinite(Date.parse(r.dueAt)) && typeof r.timezone === "string" && validTimezone(r.timezone) && ["scheduled", "due", "acknowledged", "canceled"].includes(r.status) && Number.isSafeInteger(r.revision) && r.revision > 0 && typeof r.createdAt === "string" && Number.isFinite(Date.parse(r.createdAt)) && typeof r.updatedAt === "string" && Number.isFinite(Date.parse(r.updatedAt));
+};
+function noticeStorageKey() { return `media-harness.reminders.${identity?.userId ?? "unknown"}`; }
+function persistNotices() { if (!identity) return; try { localStorage.setItem(noticeStorageKey(), JSON.stringify({ ids: [...noticeIds].slice(-500), notices: notices.slice(-100) })); } catch { /* Storage may be unavailable; in-memory dedupe still applies. */ } }
+function restoreNotices() {
+  notices = []; noticeIds.clear(); if (!identity) return;
+  try {
+    const saved = JSON.parse(localStorage.getItem(noticeStorageKey()) ?? "[]") as unknown;
+    if (Array.isArray(saved)) {
+      for (const item of saved.slice(-100)) if (item && typeof item.notificationId === "string" && isReminder(item.reminder) && typeof item.receivedAt === "string") { notices.push(item as ReminderNotice); noticeIds.add(item.notificationId); }
+    } else if (saved && typeof saved === "object") {
+      const stored = saved as { ids?: unknown; notices?: unknown };
+      if (Array.isArray(stored.ids)) for (const id of stored.ids.slice(-500)) if (typeof id === "string") noticeIds.add(id);
+      if (Array.isArray(stored.notices)) for (const item of stored.notices.slice(-100)) if (item && typeof item.notificationId === "string" && isReminder(item.reminder) && typeof item.receivedAt === "string") notices.push(item as ReminderNotice);
+    }
+  } catch { /* Ignore malformed persisted notices. */ }
+  renderNotices();
+}
+function renderNotices() {
+  const list = element("reminder-notifications"); list.replaceChildren();
+  if (!notices.length) { addText(list, "p", "No reminder notifications yet."); return; }
+  for (const notice of [...notices].reverse()) {
+    const item = document.createElement("article"); item.className = "notice";
+    item.dataset.notificationId = notice.notificationId;
+    addText(item, "strong", notice.reminder.text);
+    addText(item, "p", `Due ${new Date(notice.reminder.dueAt).toLocaleString()} · ${notice.reminder.timezone} · received ${new Date(notice.receivedAt).toLocaleString()}`);
+    list.append(item);
+  }
+}
+function renderReminders() {
+  const list = element("reminders-list"); list.replaceChildren();
+  if (!reminders.length) addText(list, "p", "No reminders yet.");
+  for (const reminder of reminders) {
+    const row = document.createElement("article"); row.className = "reminder-row";
+    const info = document.createElement("div"); addText(info, "strong", reminder.text); addText(info, "p", `${new Date(reminder.dueAt).toLocaleString()} · ${reminder.timezone} · ${reminder.status}`); row.append(info);
+    if (reminder.status !== "canceled" && reminder.status !== "acknowledged") {
+      const edit = document.createElement("button"); edit.type = "button"; edit.textContent = "Edit / reschedule"; edit.onclick = () => fillReminderForm(reminder); row.append(edit);
+      const cancel = document.createElement("button"); cancel.type = "button"; cancel.textContent = "Cancel"; cancel.onclick = () => void cancelReminder(reminder); row.append(cancel);
+    }
+    list.append(row);
+  }
+  const more = element<HTMLButtonElement>("load-more-reminders"); more.hidden = !remindersNextCursor; more.disabled = reminderListLoading; more.textContent = reminderListLoading ? "Loading…" : "Load more reminders";
+  element<HTMLButtonElement>("reminder-submit").textContent = editingReminderId ? "Save reminder changes" : "Create reminder";
+}
+function reminderFormMessage(message: string) { element("reminder-form-status").textContent = message; }
+function fillReminderForm(reminder?: Reminder, text = "", dueAt?: string, source?: { noteId: string; actionItemIndex: number }) {
+  editingReminderId = reminder?.id ?? ""; reminderSource = source;
+  const tz = reminder?.timezone ?? element<HTMLInputElement>("reminder-timezone").value;
+  element<HTMLInputElement>("reminder-text").value = reminder?.text ?? text;
+  element<HTMLInputElement>("reminder-timezone").value = tz;
+  const suggested = dueAt ? (Number.isFinite(Date.parse(dueAt)) ? toLocalInput(dueAt, tz) : `${dueAt.slice(0, 10)}T09:00`) : "";
+  element<HTMLInputElement>("reminder-due").value = reminder ? toLocalInput(reminder.dueAt, tz) : (suggested || toLocalInput(new Date(Date.now() + 3600000).toISOString(), tz));
+  element<HTMLButtonElement>("reminder-cancel-edit").hidden = !reminder;
+  reminderFormMessage(source ? "Action item copied into the form. Review the time and select Create reminder to confirm." : reminder ? "Editing reminder. Save changes to confirm." : "Review the reminder and select Create reminder to confirm.");
+  renderReminders();
+}
+async function loadReminders(append = false) {
+  const generationAtStart = generation;
+  if (reminderListLoading) return;
+  const cursor = append ? remindersNextCursor : null;
+  if (append && !cursor) return;
+  reminderListLoading = true;
+  if (!append) { remindersNextCursor = null; reminders = []; element("reminders-list").textContent = "Loading reminders…"; }
+  renderReminders();
+  let failed = false;
+  try {
+    const result = await request<{ reminders: Reminder[]; nextCursor?: string | null }>(`/api/reminders${cursor ? `?before=${encodeURIComponent(cursor)}` : ""}`);
+    if (generationAtStart !== generation) return;
+    const page = (result.reminders ?? []).filter(isReminder);
+    reminders = append ? [...reminders, ...page.filter(item => !reminders.some(existing => existing.id === item.id))] : page;
+    remindersNextCursor = result.nextCursor ?? null; renderReminders();
+  } catch { failed = true; if (generationAtStart === generation) { if (!append) element("reminders-list").textContent = "Could not load reminders. Check the connection and try again."; else reminderFormMessage("Could not load more reminders. Try again."); } }
+  finally { if (generationAtStart === generation) { reminderListLoading = false; if (!failed || append) renderReminders(); } }
+}
+function refreshRemindersSoon() { if (reminderRefreshTimer) clearTimeout(reminderRefreshTimer); reminderRefreshTimer = setTimeout(() => { reminderRefreshTimer = undefined; remindersNextCursor = null; void loadReminders(); }, 1000); }
+async function submitReminderMutation() {
+  if (reminderBusy) return;
+  if (!reminderRequest) {
+    const text = element<HTMLInputElement>("reminder-text").value.trim(), timezone = element<HTMLInputElement>("reminder-timezone").value.trim();
+    if (!text) { reminderFormMessage("Enter reminder text."); return; }
+    let dueAt: string; try { dueAt = wallTimeToIso(element<HTMLInputElement>("reminder-due").value, timezone); } catch (error) { reminderFormMessage(error instanceof Error ? error.message : "Invalid date or time."); return; }
+    if (editingReminderId) { const current = reminders.find(r => r.id === editingReminderId); if (!current) { reminderFormMessage("This reminder is no longer available. Refresh and try again."); return; }
+      reminderRequest = { method: "PATCH", path: `/api/reminders/${encodeURIComponent(current.id)}`, body: { requestId: crypto.randomUUID(), revision: current.revision, text, dueAt, timezone } };
+    } else reminderRequest = { method: "POST", path: "/api/reminders", body: { requestId: crypto.randomUUID(), text, dueAt, timezone, ...(reminderSource ? { source: reminderSource } : {}) } };
+  }
+  const operation = reminderRequest; reminderBusy = true; element<HTMLButtonElement>("reminder-submit").disabled = true;
+  const ownerToken = token, ownerId = identity?.userId, ownerGeneration = generation;
+  try {
+    const saved = await request<Reminder>(operation.path, operation.body, operation.method);
+    if (token !== ownerToken || identity?.userId !== ownerId || generation !== ownerGeneration || reminderRequest !== operation) return;
+    if (!isReminder(saved)) throw new Error("The server returned an invalid reminder.");
+    reminderRequest = undefined; reminderBusy = false; reminders = [saved, ...reminders.filter(r => r.id !== saved.id)]; remindersNextCursor = null; editingReminderId = ""; reminderSource = undefined;
+    element<HTMLInputElement>("reminder-text").value = ""; element<HTMLButtonElement>("reminder-cancel-edit").hidden = true; element<HTMLButtonElement>("reminder-retry").hidden = true; renderReminders(); reminderFormMessage("Reminder saved."); void loadReminders();
+  } catch (error) {
+    if (token !== ownerToken || identity?.userId !== ownerId || generation !== ownerGeneration || reminderRequest !== operation) return;
+    reminderBusy = false; const transient = !(error instanceof HttpError) || error.status >= 500;
+    if (transient) { element<HTMLButtonElement>("reminder-retry").hidden = false; reminderFormMessage("The request may have reached the server. Retry uses the same request ID safely."); }
+    else { reminderRequest = undefined; if (error instanceof HttpError && error.status === 409) { remindersNextCursor = null; void loadReminders(); } reminderFormMessage(`Could not save reminder${error instanceof HttpError && error.code ? ` (${error.code})` : ""}. Review it and submit again.`); }
+  } finally { if (token === ownerToken && identity?.userId === ownerId) { reminderBusy = false; element<HTMLButtonElement>("reminder-submit").disabled = false; if (generation !== ownerGeneration && reminderRequest === operation) element<HTMLButtonElement>("reminder-retry").hidden = false; } }
+}
+async function cancelReminder(reminder: Reminder) {
+  if (reminderBusy) return;
+  reminderRequest = { method: "PATCH", path: `/api/reminders/${encodeURIComponent(reminder.id)}`, body: { requestId: crypto.randomUUID(), revision: reminder.revision, status: "canceled" } };
+  await submitReminderMutation();
 }
 function reconcile() {
   if (!media) return;
@@ -63,6 +177,8 @@ function reconcile() {
 }
 function detach(track: RemoteAudioTrack) { track.setVolume(0); for (const el of track.detach()) el.remove(); playing.get(track)?.element.remove(); playing.delete(track); }
 function stop(message: string) {
+  if (reminderRefreshTimer) { clearTimeout(reminderRefreshTimer); reminderRefreshTimer = undefined; }
+  reminderListLoading = false;
   generation++; mediaEpoch++; connecting = false; keys.clear(); gains.clear(); revision = -1;
   target = { mode: "floor", zoneId: "" }; transitionRev = -1; micIntent = false; lastPolicy = undefined; failed = undefined; meetingText.textContent = ""; meetingSessionId = ""; aiState = undefined; localAIDecision = undefined; aiRequestPending = false; renderAI();
   const oldOffice = office, oldMedia = media; office = undefined; media = undefined;
@@ -105,7 +221,13 @@ function renderNote(note: Note) {
     if (!entries?.length) addText(list, "li", "None"); article.append(list);
   };
   addSection("Summary", note.draft.summary ?? []); addSection("Decisions", note.draft.decisions ?? []);
-  addSection("Action items", (note.draft.actionItems ?? []).map(item => ({ ...item, text: `${item.text}${item.ownerUserId ? ` · owner ${item.ownerUserId}` : " · owner unset"}${item.dueAt ? ` · due ${item.dueAt}` : " · due date unset"}` })));
+  addText(article, "h4", "Action items"); const actions = document.createElement("ul");
+  for (const [index, item] of (note.draft.actionItems ?? []).entries()) {
+    const li = document.createElement("li"); li.append(document.createTextNode(`${item.text}${item.ownerUserId ? ` · owner ${item.ownerUserId}` : " · owner unset"}${item.dueAt ? ` · due ${item.dueAt}` : " · due date unset"} `));
+    const button = document.createElement("button"); button.type = "button"; button.className = "small-button"; button.textContent = "Use action item"; button.onclick = () => { fillReminderForm(undefined, item.text, item.dueAt ?? undefined, { noteId: note.id, actionItemIndex: index }); element("reminder-panel").scrollIntoView({ behavior: "smooth", block: "start" }); };
+    li.append(button); actions.append(li);
+  }
+  if (!note.draft.actionItems?.length) addText(actions, "li", "None"); article.append(actions);
   return article;
 }
 async function loadNotes(openId?: string) {
@@ -213,17 +335,20 @@ async function transition(t: MediaTransition) {
 }
 async function connect() {
   if (connecting || office) return;
-  connecting = true; const attempt = ++generation; controls(); status.textContent = "Joining office…";
+  connecting = true; const attempt = ++generation; reminderListLoading = false; controls(); status.textContent = "Joining office…";
   let candidate: OfficeRoom<State> | undefined;
   try {
-    identity = await request<GuestIdentity>("/api/sessions/current");
+    const freshIdentity = await request<GuestIdentity>("/api/sessions/current");
+    if (identity && identity.userId !== freshIdentity.userId) { reminders = []; remindersNextCursor = null; reminderRequest = undefined; editingReminderId = ""; reminderSource = undefined; reminderBusy = false; }
+    identity = freshIdentity;
+    restoreNotices();
     const path = `/api/offices/${encodeURIComponent(identity.officeId)}`;
     map = await request<OfficeMap>(`${path}/map`);
     const client = new Client(location.origin);
     const seat = await request<Parameters<Client["consumeSeatReservation"]>[0]>(`${path}/join`, { protocolVersion: PROTOCOL_VERSION });
     candidate = await client.consumeSeatReservation<State>(seat);
     if (attempt !== generation) { await candidate.leave(); return; }
-    office = candidate; sequence = 0;
+    office = candidate; sequence = 0; void loadReminders();
     candidate.onMessage("session.ready", () => {});
     candidate.onMessage("request.error", (error: {code?: string}) => {
       if (attempt !== generation) return;
@@ -246,6 +371,18 @@ async function connect() {
       aiState = value; aiRequestPending = false; renderAI();
     });
     candidate.onMessage("notes.ready", (value: { noteId: string; aiSessionId: string }) => { if (attempt === generation && value?.noteId) { void loadNotes(value.noteId); } });
+    candidate.onMessage("reminder.due", (value: { notificationId?: unknown; reminder?: unknown }) => {
+      if (attempt !== generation || office !== candidate || typeof value?.notificationId !== "string" || !value.notificationId || value.notificationId.length > 200 || !isReminder(value.reminder)) return;
+      const notificationId = value.notificationId;
+      if (!noticeIds.has(notificationId)) {
+        noticeIds.add(notificationId); notices.push({ notificationId, reminder: value.reminder, receivedAt: new Date().toISOString() });
+        if (noticeIds.size > 500) noticeIds.delete(noticeIds.values().next().value!);
+        if (notices.length > 100) notices.splice(0, notices.length - 100);
+        persistNotices(); renderNotices();
+      }
+      try { candidate!.send("reminder.ack", { notificationId }); } catch { /* The server retries delivery; dedupe is persisted for reconnect. */ }
+      refreshRemindersSoon();
+    });
     candidate.onDrop(() => { if (attempt === generation) stop("Office connection dropped. Media stopped; retry manually."); });
     candidate.onLeave(() => { if (attempt === generation) stop("Office disconnected. Retry manually (a held seat may need time to expire)."); });
     candidate.onError(() => { if (attempt === generation) stop("Office connection failed. Retry manually."); });
@@ -272,7 +409,14 @@ aiDecline.onclick = () => decideAI(false);
 aiWithdraw.onclick = () => { if (!office || !aiState) return; office.send("ai.consent", { aiSessionId: aiState.aiSessionId, revision: aiState.revision, consent: false }); localAIDecision = false; element("ai-status").textContent = "Consent withdrawn. Capture and pending processing will be canceled by the server."; renderAI(); };
 aiStop.onclick = () => { if (!office || !aiState) return; office.send("ai.stop", { aiSessionId: aiState.aiSessionId, revision: aiState.revision }); element("ai-status").textContent = "Stop requested. Authorized audio will be finalized into draft notes."; controls(); };
 element<HTMLButtonElement>("refresh-notes").onclick = () => void loadNotes();
-element("forget").onclick = () => { stop("Saved guest forgotten. Create a new guest to join."); token = ""; sessionStorage.removeItem(storageKey); controls(); };
+element<HTMLFormElement>("reminder-form").addEventListener("submit", event => { event.preventDefault(); void submitReminderMutation(); });
+element<HTMLButtonElement>("reminder-retry").onclick = () => { if (reminderRequest) void submitReminderMutation(); };
+element<HTMLButtonElement>("reminder-cancel-edit").onclick = () => { reminderRequest = undefined; editingReminderId = ""; reminderSource = undefined; element<HTMLInputElement>("reminder-text").value = ""; element<HTMLButtonElement>("reminder-cancel-edit").hidden = true; element<HTMLButtonElement>("reminder-retry").hidden = true; fillReminderForm(); };
+element<HTMLButtonElement>("refresh-reminders").onclick = () => void loadReminders();
+element<HTMLButtonElement>("load-more-reminders").onclick = () => void loadReminders(true);
+element<HTMLInputElement>("reminder-timezone").value = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+fillReminderForm();
+element("forget").onclick = () => { const oldNoticeKey = noticeStorageKey(); stop("Saved guest forgotten. Create a new guest to join."); token = ""; identity = undefined; reminders = []; remindersNextCursor = null; notices = []; noticeIds.clear(); reminderRequest = undefined; reminderBusy = false; editingReminderId = ""; reminderSource = undefined; sessionStorage.removeItem(storageKey); try { localStorage.removeItem(oldNoticeKey); } catch { /* Ignore unavailable storage. */ } renderReminders(); renderNotices(); controls(); };
 mic.onclick = () => { if (!media || micBusy) return; const current = media, attempt = generation; micBusy = true; controls(); void (async () => {
   try { await current.localParticipant.setMicrophoneEnabled(!microphoneActive); if (generation !== attempt) { for (const pub of current.localParticipant.trackPublications.values()) pub.track?.stop(); return; } microphoneActive = !microphoneActive; muted = !microphoneActive; savePreferences(); preferences(); mediaStatus.textContent = microphoneActive ? "Microphone on." : "Microphone muted."; }
   catch { microphoneActive = false; muted = true; savePreferences(); preferences(); mediaStatus.textContent = "Microphone unavailable or permission denied. Listening and movement remain available."; }

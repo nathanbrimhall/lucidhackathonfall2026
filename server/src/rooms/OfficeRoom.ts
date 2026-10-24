@@ -1,7 +1,7 @@
 import { Room, ServerError, type Client } from "@colyseus/core";
 import { PROTOCOL_VERSION, type PlayerInput, type ErrorCode, type MediaPreferences, type MediaTransition, type AudioPolicy, type MeetingEntered, type MeetingExited } from "../../../shared/src/protocol.js";
 import type { OfficeMap } from "../../../shared/src/map-contract.js";
-import { joinOfficeSchema, playerInputSchema, playerStatusSchema, mediaPreferencesSchema, mediaTransitionAckSchema, aiRequestSchema, aiConsentSchema, aiStopSchema } from "../../../shared/src/validation.js";
+import { joinOfficeSchema, playerInputSchema, playerStatusSchema, mediaPreferencesSchema, mediaTransitionAckSchema, aiRequestSchema, aiConsentSchema, aiStopSchema, reminderAckSchema } from "../../../shared/src/validation.js";
 import { AuthError, type AuthService } from "../auth/AuthService.js";
 import { movePlayer, SIMULATION_INTERVAL_MS } from "../domain/movement.js";
 import { OfficeRegistry, SEAT_RESERVATION_SECONDS } from "./OfficeRegistry.js";
@@ -12,13 +12,14 @@ import { Meetings, type MeetingChange } from "../domain/meetings.js";
 import type { LiveKitService } from "../services/LiveKitService.js";
 import { AIError, type AISessionService, type AIMeeting } from "../services/AISessionService.js";
 import { log } from "../log.js";
+import { ReminderError, type ReminderService } from "../services/ReminderService.js";
 
 export const INPUT_TIMEOUT_MS = 250;
 export const RECONNECTION_SECONDS = 30;
 interface InputState { input?: PlayerInput; receivedAt: number; lastSeq: number; windowStart: number; count: number; rateErrorSent: boolean }
 export interface OfficeRoomOptions { reconnectionSeconds?: number; maxClients?: number }
 
-export function createOfficeRoom(auth: AuthService, officeId: string, registry: OfficeRegistry, map: OfficeMap, options: OfficeRoomOptions = {}, media?: LiveKitService, ai?: AISessionService) {
+export function createOfficeRoom(auth: AuthService, officeId: string, registry: OfficeRegistry, map: OfficeMap, options: OfficeRoomOptions = {}, media?: LiveKitService, ai?: AISessionService, reminders?: ReminderService) {
   return class OfficeRoom extends Room<{ state: InstanceType<typeof OfficeState> }> {
     maxClients = options.maxClients ?? 20;
     autoDispose = false;
@@ -46,6 +47,17 @@ export function createOfficeRoom(auth: AuthService, officeId: string, registry: 
       this.setPatchRate(50);
       this.setSimulationInterval((elapsedMs) => this.simulate(elapsedMs), SIMULATION_INTERVAL_MS);
       this.clock.setInterval(() => this.sendAudioPolicies(), 200);
+      this.onMessage("reminder.ack", (client, payload) => {
+        if (!this.consumeMessage(client)) return;
+        const parsed = reminderAckSchema.safeParse(payload);
+        if (!parsed.success) { this.error(client, "INVALID_INPUT", "Expected {notificationId}"); return; }
+        try {
+          const identity = this.authorize(client);
+          reminders?.acknowledge(identity.userId, officeId, parsed.data.notificationId);
+        } catch (error) {
+          this.error(client, error instanceof ReminderError ? error.code : "UNAUTHORIZED", error instanceof ReminderError ? error.message : "Session authorization required");
+        }
+      });
       for (const [event, schema] of [["ai.request", aiRequestSchema], ["ai.consent", aiConsentSchema], ["ai.stop", aiStopSchema]] as const) {
         this.onMessage(event, (client, payload) => {
           if (!this.consumeMessage(client)) return;
@@ -111,6 +123,7 @@ export function createOfficeRoom(auth: AuthService, officeId: string, registry: 
       const player = this.state.players.get(client.sessionId);
       if (!player) return;
       player.connected = false;
+      reminders?.unregister(client.sessionId);
       this.pendingInputs.delete(client.sessionId);
       this.removeMedia(client.sessionId);
       // Dropped seats leave meeting occupancy (rotating the epoch for the rest); zoneId stays position-derived.
@@ -134,6 +147,7 @@ export function createOfficeRoom(auth: AuthService, officeId: string, registry: 
     }
 
     onLeave(client: Client) {
+      reminders?.unregister(client.sessionId);
       this.removeMedia(client.sessionId);
       this.applyMeetings(this.meetings.forget(client.sessionId));
       this.preferences.delete(client.sessionId);
@@ -146,12 +160,14 @@ export function createOfficeRoom(auth: AuthService, officeId: string, registry: 
 
     onBeforeShutdown() {
       this.stopping = true;
+      for (const sessionId of this.state.players.keys()) reminders?.unregister(sessionId);
       for (const id of this.aiMeetings.values()) ai?.syncMeeting(id);
       this.aiMeetings.clear();
       for (const sessionId of this.state.players.keys()) this.removeMedia(sessionId);
       this.pendingInputs.clear(); super.onBeforeShutdown();
     }
     async onDispose() {
+      for (const sessionId of this.state.players.keys()) reminders?.unregister(sessionId);
       this.pendingInputs.clear(); this.preferences.clear(); this.eligible.clear(); registry.clear();
       await Promise.allSettled(this.mediaRemovals);
       try { await media?.cleanupRoom(this.roomId); } catch { log("media.cleanup.failed"); }
@@ -271,6 +287,11 @@ export function createOfficeRoom(auth: AuthService, officeId: string, registry: 
 
     private ready(client: Client) {
       client.send("session.ready", { ...client.auth.identity, sessionId: client.sessionId, protocolVersion: PROTOCOL_VERSION });
+      reminders?.register(client.sessionId, client.auth.identity.userId, officeId, payload => {
+        // Expired/revoked sessions must not receive private content on an old socket.
+        this.authorize(client);
+        if (!this.stopping && this.state.players.get(client.sessionId)?.connected) client.send("reminder.due", payload);
+      });
     }
     private resetInput(sessionId: string, lastSeq = -1) {
       this.pendingInputs.set(sessionId, { receivedAt: 0, lastSeq, windowStart: performance.now(), count: 0, rateErrorSent: false });

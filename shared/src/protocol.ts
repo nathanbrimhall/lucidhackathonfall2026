@@ -1,7 +1,7 @@
 /** Public, renderer-independent application contract. Never export server credentials here. */
 export const PROTOCOL_VERSION = 1 as const;
 export const OFFICE_ROOM = "office";
-export const ERROR_CODES = ["INVALID_INPUT", "UNAUTHORIZED", "FORBIDDEN", "ROOM_FULL", "DUPLICATE_CONNECTION", "RATE_LIMITED", "INTERNAL_ERROR", "UNAVAILABLE", "STALE_TRANSITION", "TRANSITION_PENDING", "AI_UNAVAILABLE", "STALE_CONSENT", "NOT_FOUND"] as const;
+export const ERROR_CODES = ["INVALID_INPUT", "UNAUTHORIZED", "FORBIDDEN", "ROOM_FULL", "DUPLICATE_CONNECTION", "RATE_LIMITED", "INTERNAL_ERROR", "UNAVAILABLE", "STALE_TRANSITION", "TRANSITION_PENDING", "AI_UNAVAILABLE", "STALE_CONSENT", "NOT_FOUND", "CONFLICT"] as const;
 export type ErrorCode = typeof ERROR_CODES[number];
 export interface RequestError { code: ErrorCode; message: string }
 export interface GuestIdentity {
@@ -109,3 +109,20 @@ export interface DraftNotes {
   actionItems: (DraftClaim & { ownerUserId: string | null; dueAt: string | null })[];
 }
 export interface NoteRecord { id: string; aiSessionId: string; createdAt: string; partial: boolean; draft: DraftNotes }
+
+/** Reminders are always owned by the authenticated caller, including confirmed AI proposals. */
+export interface ReminderSource { noteId: string; actionItemIndex: number }
+export interface CreateReminderRequest {
+  requestId: string; text: string; dueAt: string; timezone: string; source?: ReminderSource;
+}
+export interface PatchReminderRequest {
+  requestId: string; revision: number; text?: string; dueAt?: string; timezone?: string; status?: "canceled";
+}
+export interface ReminderRecord {
+  id: string; text: string; dueAt: string; timezone: string;
+  status: "scheduled" | "due" | "acknowledged" | "canceled";
+  revision: number; createdAt: string; updatedAt: string; source?: ReminderSource;
+}
+/** Retry delivery with this stable ID until the owner acknowledges it. */
+export interface ReminderDue { notificationId: string; reminder: ReminderRecord }
+export interface ReminderAck { notificationId: string }
