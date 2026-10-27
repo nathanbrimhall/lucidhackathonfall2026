@@ -1,4 +1,5 @@
 import { OfficeClient } from './client.js';
+import { createPanelRenderer } from './panel-render.js';
 import { createRefreshQueue,readOfficeView } from './refresh.js';
 import { createPainter } from './renderer.js';
 import type { NoteRecord,AIStatus } from '../shared/src/protocol.js';
@@ -13,6 +14,7 @@ const textarea=(parent:HTMLElement,label:string,value='',max=2000)=>{const l=add
 const name=(id:string|null|undefined)=>snapshot?.directory.find((p:any)=>p.userId===id)?.displayName??(id?'Unknown teammate':'Unassigned');
 let demoInfo:{enabled:boolean;users:{userId:string;displayName:string}[]}={enabled:false,users:[]};
 let panel='office',snapshot:any,notes:NoteRecord[]=[],reminders:any[]=[],assistantResult:any=null,formDraft:any={feature:'decisions',prompt:'',fromDate:'',toDate:'',detail:'my_work'},renderSignature='',assistantPending=false,toastTimer:ReturnType<typeof setTimeout>,viewEpoch=0,notesLoaded=false,remindersLoaded=false;
+const render=createPanelRenderer(document,paintPanels);
 const seenNotices=new Set<string>();let initialNotices=true;let previousAvailability='';
 function toast(text:string){$('#toast').textContent=text;$('#toast').hidden=false;clearTimeout(toastTimer);toastTimer=setTimeout(()=>$('#toast').hidden=true,4500);}
 const client=new OfficeClient(changed,(type,value)=>{
@@ -73,7 +75,7 @@ function renderAssistant(parent:HTMLElement){
   if(item.kind==='overlap'){const task=snapshot.tasks.find((x:SharedTask)=>x.id===item.proposedTaskId);if(task?.ownerUserId===client.identity?.userId)button(card,'Confirm duplicate and link',()=>perform(()=>client.api(`/api/collaboration/tasks/${task.id}/link`,{revision:task.revision,existingTaskId:item.existingTaskId})));}
  }
 }
-function render(){const side=$('#side');side.replaceChildren();const head=add(side,'div');head.className='side-header';add(head,'h2',client.identity?({office:'Your office',people:'Teammates',notes:'Meeting notes',tasks:'Shared tasks','desk-notes':'Desk notes',reminders:'My reminders',assistant:'Collaboration assistant'} as Record<string,string>)[panel]:'Join Lucid Office');
+function paintPanels(){const side=$('#side');side.replaceChildren();const head=add(side,'div');head.className='side-header';add(head,'h2',client.identity?({office:'Your office',people:'Teammates',notes:'Meeting notes',tasks:'Shared tasks','desk-notes':'Desk notes',reminders:'My reminders',assistant:'Collaboration assistant'} as Record<string,string>)[panel]:'Join Lucid Office');
  const content=add(side,'div');content.style.padding='0 22px 24px';
  if(!client.identity){if(demoInfo.enabled){add(content,'p','Fictional local demo. Choose a different account in each browser window. No live conversation was recorded.');for(const user of demoInfo.users)button(content,'Use '+user.displayName,()=>client.useDemo(user.userId).catch(error=>toast(error.message)));add(content,'hr');}const form=add(content,'form');const displayName=input(form,'Display name'),invite=input(form,'Office invite code','password');displayName.required=true;displayName.maxLength=40;invite.required=true;const join=add(form,'button','Join office');join.className='primary';form.onsubmit=e=>{e.preventDefault();join.disabled=true;void client.join(displayName.value,invite.value).catch(error=>toast(error.message)).finally(()=>{join.disabled=false;});};if(client.token)button(content,'Resume my session',()=>void client.resume().catch(error=>toast(error.message)));add(content,'p',client.status);return;}
  if(!snapshot){add(content,'p','Loading your office data...');return;}
