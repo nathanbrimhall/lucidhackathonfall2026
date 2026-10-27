@@ -1,3 +1,7 @@
+import { seedManualDemo } from "./domain/manual-demo.js";
+import { z } from "zod";
+import { CollaborationService, CollaborationError } from "./services/CollaborationService.js";
+import { OfficeAssistant } from "./services/OfficeAssistant.js";
 // Foundation adapted from create-colyseus-app 0.18.1's TypeScript minimal starter.
 import { createServer } from "node:http";
 import { fileURLToPath } from "node:url";
@@ -21,13 +25,17 @@ import { LiveKitService, MediaError } from "./services/LiveKitService.js";
 import { ReminderRepository } from "./repositories/ReminderRepository.js";
 import { ReminderService, ReminderError } from "./services/ReminderService.js";
 
-export function createApplication(config: Config, roomOptions: OfficeRoomOptions = {}, media = new LiveKitService(config)) {
-  const map = loadOfficeMap();
+export function createApplication(config: Config, roomOptions: OfficeRoomOptions = {}, media = new LiveKitService(config), integration: {assistantEnv?: NodeJS.ProcessEnv; assistantRequest?: typeof fetch; assistantCooldown?: number; manualDemo?: boolean} = {}) {
+  if(integration.manualDemo&&config.databasePath!==":memory:")throw new Error("Manual demo requires an isolated in-memory database.");
+  const map = loadOfficeMap(config.officeLayout);
   const storage = openStorage(config.databasePath);
   const auth = new AuthService(storage, config);
   const offices = new OfficeRegistry();
   const ai = new AISessionService(new AIRepository(storage), config, media);
+  const collaboration = new CollaborationService(storage, ai.repo);
+  const assistant = new OfficeAssistant(ai.repo,collaboration,integration.assistantEnv,integration.assistantRequest,integration.assistantCooldown);
   const reminders = new ReminderService(new ReminderRepository(storage));
+  const demoUsers=integration.manualDemo?seedManualDemo(auth,ai.repo,collaboration,config):undefined;
   const httpServer = createServer();
   let stopping = false;
   let mediaStatus: "unknown" | "up" | "down" = "unknown";
@@ -123,7 +131,8 @@ export function createApplication(config: Config, roomOptions: OfficeRoomOptions
         if (stopping) { res.status(503).json(errorBody("UNAVAILABLE", "Server is shutting down")); return; }
         const now = Date.now();
         for (const [key, window] of rateWindows) if (window.expires <= now) rateWindows.delete(key);
-        const key = req.socket.remoteAddress ?? "unknown";
+        let key = "ip:"+(req.socket.remoteAddress ?? "unknown");
+        if(req.headers.authorization){try{const identity=auth.authenticate(bearer(req.headers.authorization));key=`user:${identity.officeId}:${identity.userId}`;}catch{/* Invalid sessions stay in the anonymous IP budget. */}}
         const window = rateWindows.get(key) ?? { count: 0, expires: now + 60_000 };
         if (rateWindows.size >= 10_000 && !rateWindows.has(key)) { res.status(429).json(errorBody("RATE_LIMITED", "Retry later")); return; }
         rateWindows.set(key, window);
@@ -134,6 +143,24 @@ export function createApplication(config: Config, roomOptions: OfficeRoomOptions
         next();
       });
       app.use(express.json({ limit: "4kb", strict: true }));
+      app.get("/api/demo",(_req,res)=>res.json({enabled:!!demoUsers,users:demoUsers?.map(({userId,displayName})=>({userId,displayName}))??[]}));
+      if(demoUsers)app.post("/api/demo/session",(req,res)=>{const input=z.strictObject({userId:z.string()}).parse(req.body);const user=demoUsers.find(p=>p.userId===input.userId);if(!user)throw new CollaborationError(404,"Demo identity not found.");res.json(user);});
+      const who=(req:express.Request)=>auth.authenticate(bearer(req.headers.authorization));
+      app.get("/api/collaboration",(req,res)=>{const identity=who(req);res.json({identity,directory:collaboration.directory(identity),profile:collaboration.profile(identity),tasks:collaboration.tasks(identity),messages:collaboration.messages(identity),notifications:collaboration.notices(identity),drafts:collaboration.drafts(identity),assistantConfigured:assistant.configured(),assistantUsage:assistant.usageStatus()});});
+      app.patch("/api/collaboration/profile",(req,res)=>res.json(collaboration.updateProfile(who(req),req.body)));
+      app.post("/api/collaboration/tasks",(req,res)=>res.status(201).json(collaboration.createTask(who(req),req.body)));
+      app.patch("/api/collaboration/tasks/:id",(req,res)=>res.json(collaboration.updateTask(who(req),req.params.id,req.body)));
+      app.post("/api/collaboration/tasks/:id/dependencies",(req,res)=>res.json(collaboration.dependency(who(req),req.params.id,req.body)));
+      app.post("/api/collaboration/tasks/:id/link",(req,res)=>res.json(collaboration.link(who(req),req.params.id,req.body)));
+      app.post("/api/collaboration/tasks/:id/dependencies/remove",(req,res)=>res.json(collaboration.removeDependency(who(req),req.params.id,req.body)));
+      app.post("/api/collaboration/tasks/:id/unlink",(req,res)=>{const identity=who(req);const input=z.strictObject({revision:z.number().int().positive()}).parse(req.body);res.json(collaboration.unlink(identity,req.params.id,input.revision));});
+      app.post("/api/collaboration/messages",(req,res)=>res.status(201).json(collaboration.send(who(req),req.body)));
+      app.post("/api/collaboration/messages/:id/read",(req,res)=>res.json(collaboration.read(who(req),req.params.id,"message")));
+      app.post("/api/collaboration/notifications/:id/read",(req,res)=>res.json(collaboration.read(who(req),req.params.id,"notice")));
+      app.post("/api/collaboration/drafts",(req,res)=>res.status(201).json(collaboration.createDraft(who(req),req.body)));
+      app.patch("/api/collaboration/drafts/:id",(req,res)=>res.json(collaboration.updateDraft(who(req),req.params.id,req.body)));
+      app.post("/api/collaboration/drafts/:id/send",(req,res)=>{const identity=who(req);const input=z.strictObject({revision:z.number().int().positive()}).parse(req.body);res.json(collaboration.sendDraft(identity,req.params.id,input.revision));});
+      app.post("/api/assistant",async(req,res)=>{const identity=who(req),controller=new AbortController();res.once("close",()=>{if(!res.writableEnded)controller.abort();});try{const result=await assistant.run(identity,req.body,controller.signal);who(req);res.json(result);}catch(error){if(error instanceof CollaborationError||error instanceof z.ZodError)throw error;const code=(error as {code?:string}).code;res.status(code?.includes("QUOTA")||code==="LOCAL_BUDGET_EXCEEDED"?429:503).json({error:{code:code??"UNAVAILABLE",message:code??"Assistant request failed. No changes were made."}});}});
       app.get("/api/reminders", (req, res) => {
         const identity = auth.authenticate(bearer(req.headers.authorization));
         if (req.query.before !== undefined && typeof req.query.before !== "string") throw new ReminderError("INVALID_INPUT", "Expected a reminder cursor");
@@ -150,11 +177,11 @@ export function createApplication(config: Config, roomOptions: OfficeRoomOptions
       });
       app.get("/api/notes", (req,res) => {
         const identity=auth.authenticate(bearer(req.headers.authorization));
-        res.json({notes:ai.repo.notes(identity.userId)});
+        res.json({notes:ai.repo.notes(identity.userId,identity.officeId)});
       });
       app.get("/api/notes/:id", (req,res) => {
         const identity=auth.authenticate(bearer(req.headers.authorization));
-        const note=ai.repo.note(req.params.id,identity.userId);
+        const note=ai.repo.note(req.params.id,identity.userId,identity.officeId);
         if(!note) throw new AIError("NOT_FOUND");
         res.json(note);
       });
@@ -180,7 +207,12 @@ export function createApplication(config: Config, roomOptions: OfficeRoomOptions
         const seat = await offices.reserve(identity.userId, parsed.data, { token, headers: new Headers(), ip: req.socket.remoteAddress });
         res.json(seat);
       });
+      const compiledFrontend=fileURLToPath(new URL("../frontend/",import.meta.url));
+      const frontendPath=existsSync(compiledFrontend)?compiledFrontend:fileURLToPath(new URL("../../dist/server/frontend/",import.meta.url));
+      app.use("/",express.static(frontendPath,{index:"index.html",setHeaders:res=>{res.setHeader("X-Content-Type-Options","nosniff");res.setHeader("Referrer-Policy","same-origin");}}));
       const handleError: ErrorRequestHandler = (error, _req, res, _next) => {
+        if(error instanceof CollaborationError){res.status(error.status).json(errorBody(error.status===404?"NOT_FOUND":error.status===403?"FORBIDDEN":error.status===409?"CONFLICT":error.status===429?"RATE_LIMITED":"INVALID_INPUT",error.message));return;}
+        if(error instanceof z.ZodError){res.status(400).json(errorBody("INVALID_INPUT","Invalid request fields."));return;}
         if (error instanceof ReminderError) {
           const status = error.code === "INVALID_INPUT" ? 400 : error.code === "FORBIDDEN" ? 403 : error.code === "NOT_FOUND" ? 404 : error.code === "CONFLICT" ? 409 : 503;
           res.status(status).json(errorBody(error.code, error.message)); return;
@@ -220,8 +252,9 @@ export function createApplication(config: Config, roomOptions: OfficeRoomOptions
 
   return {
     server,
-    async start(port = config.port) {
-      await server.listen(port, "0.0.0.0");
+    async start(port = config.port, host = "0.0.0.0") {
+      if(integration.manualDemo&&host!=="127.0.0.1")throw new Error("Manual demo must bind only to loopback.");
+      await server.listen(port, host);
       aiTimer = setInterval(() => { try { ai.tick(); } catch { log("ai.maintenance.failed"); } }, 1000);
       aiTimer.unref();
       const scheduleReminders = () => { try { reminders.tick(); } catch { log("reminders.maintenance.failed"); } };

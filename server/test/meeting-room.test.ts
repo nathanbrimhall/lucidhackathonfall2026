@@ -8,7 +8,7 @@ import { LiveKitService, type LiveKitBackend, type MediaBinding } from "../src/s
 import type { OfficeState } from "../src/rooms/schema/OfficeState.js";
 import type { AudioPolicy, GuestSession, MediaCredentials, MediaTransition, MeetingEntered, MeetingExited, RequestError } from "../../shared/src/protocol.js";
 
-const config = loadConfig({
+const config = loadConfig({ OFFICE_LAYOUT: "legacy",
   PUBLIC_SERVER_URL: "http://localhost:2567", ALLOWED_ORIGINS: "http://localhost:2567",
   SESSION_SECRET: "test-only-session-secret-at-least-32-characters", DATABASE_URL: ":memory:",
   GUEST_INVITE_CODE: "test-invite-code", OFFICE_ID: "demo-office",

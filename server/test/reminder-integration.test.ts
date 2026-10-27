@@ -10,7 +10,7 @@ import type { GuestSession, ReminderDue, ReminderRecord, RequestError } from "..
 import type { OfficeState } from "../src/rooms/schema/OfficeState.js";
 
 const directory = mkdtempSync(join(tmpdir(), "office-reminders-"));
-const config = loadConfig({
+const config = loadConfig({ OFFICE_LAYOUT: "legacy",
   PUBLIC_SERVER_URL: "http://localhost:2567", ALLOWED_ORIGINS: "http://localhost:2567",
   SESSION_SECRET: "test-only-session-secret-at-least-32-characters", DATABASE_URL: join(directory, "office.sqlite"),
   GUEST_INVITE_CODE: "test-invite-code", OFFICE_ID: "demo-office",

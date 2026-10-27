@@ -9,6 +9,7 @@ const url = (protocols: string[]) => z.string().url().refine((value) => {
 });
 const httpUrl = url(["http:", "https:"]);
 const envSchema = z.object({
+  OFFICE_LAYOUT: z.enum(["legacy","prototype"]).default("prototype"),
   AI_TIMEZONE: z.string().default("UTC").refine(value => { try { new Intl.DateTimeFormat("en", { timeZone: value }); return true; } catch { return false; } }),
   AI_ENABLED: z.enum(["true", "false"]).default("false"),
   AI_WORKER_SECRET: z.string().min(32).max(1024).optional(),
@@ -39,6 +40,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
   if (e.AI_WORKER_SECRET && [e.SESSION_SECRET, e.LIVEKIT_API_SECRET].includes(e.AI_WORKER_SECRET)) throw new Error("Invalid configuration: AI_WORKER_SECRET must be distinct");
   if (e.DATABASE_URL.includes("://")) throw new Error("Invalid configuration: DATABASE_URL must be a SQLite file path");
   return {
+    officeLayout: e.OFFICE_LAYOUT,
     aiTimeZone: e.AI_TIMEZONE,
     aiEnabled: e.AI_ENABLED === "true", aiWorkerSecret: e.AI_WORKER_SECRET,
     aiMaxDurationSeconds: e.AI_MAX_DURATION_SECONDS, aiMaxTranscriptChars: e.AI_MAX_TRANSCRIPT_CHARS,

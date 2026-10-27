@@ -36,6 +36,12 @@ export class AIRepository {
     this.storage.db.prepare("INSERT INTO notes VALUES (?,?,?)").run(note.id,note.aiSessionId,JSON.stringify(note));
     for (const reader of readers) this.storage.db.prepare("INSERT INTO note_readers VALUES (?,?)").run(note.id,reader);
   }
-  notes(userId:string): NoteRecord[] { return (this.storage.db.prepare("SELECT record FROM notes JOIN note_readers ON notes.id=note_readers.note_id WHERE user_id=? ORDER BY notes.rowid DESC LIMIT 100").all(userId) as {record:string}[]).map(r=>JSON.parse(r.record)); }
-  note(id:string,userId:string): NoteRecord|undefined { const row = this.storage.db.prepare("SELECT record FROM notes JOIN note_readers ON notes.id=note_readers.note_id WHERE notes.id=? AND user_id=?").get(id,userId) as {record:string}|undefined; return row && JSON.parse(row.record); }
+  notes(userId:string,officeId?:string):NoteRecord[]{
+    const query="SELECT notes.record AS record FROM notes JOIN note_readers ON notes.id=note_readers.note_id JOIN ai_sessions s ON s.id=notes.ai_session_id WHERE user_id=?"+(officeId?" AND s.office_id=?":"")+" ORDER BY notes.rowid DESC LIMIT 100";
+    return (this.storage.db.prepare(query).all(...(officeId?[userId,officeId]:[userId])) as {record:string}[]).map(r=>JSON.parse(r.record));
+  }
+  note(id:string,userId:string,officeId?:string):NoteRecord|undefined{
+    const query="SELECT notes.record AS record FROM notes JOIN note_readers ON notes.id=note_readers.note_id JOIN ai_sessions s ON s.id=notes.ai_session_id WHERE notes.id=? AND user_id=?"+(officeId?" AND s.office_id=?":"");
+    const row=this.storage.db.prepare(query).get(...(officeId?[id,userId,officeId]:[id,userId])) as {record:string}|undefined;return row&&JSON.parse(row.record);
+  }
 }

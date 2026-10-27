@@ -7,6 +7,7 @@ const base = process.env.PUBLIC_SERVER_URL ?? 'http://localhost:2567';
 assert(process.env.GUEST_INVITE_CODE, 'GUEST_INVITE_CODE is required');
 const browser = await chromium.launch({ headless: true, ...(process.env.CHROMIUM_EXECUTABLE ? { executablePath: process.env.CHROMIUM_EXECUTABLE } : {}), args: ['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream', '--autoplay-policy=no-user-gesture-required', '--no-sandbox'] });
 const users = [];
+let prototypeLayout=false;
 const runId = Date.now().toString(36);
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function until(predicate, label, timeout = 15000) {
@@ -29,7 +30,7 @@ const connects = async user => Number(/LiveKit connects this page[^:]*: (\d+)/.e
 const mode = async user => /mode (\w+)/.exec(await policy(user))?.[1];
 const gainOf = async (user, speaker) => (await policy(user)).split('\n').find(line => line.startsWith(`${speaker.identity} · distance`))?.split('gain ')[1];
 const totalBytes = async user => (await audioStats(user)).reduce((sum, s) => sum + s.bytes, 0);
-async function move(user, x, y = 3) {
+async function moveRaw(user, x, y = 3) {
   const position = () => user.page.evaluate(name => window.__mediaSmoke.positions[name], user.name);
   await user.page.locator('#map').focus();
   for (let i = 0; i < 30; i++) {
@@ -63,6 +64,11 @@ try {
     await page.locator('#audio').click();
   }
   const [a,b,c] = users;
+  const guestToken=await a.page.evaluate(()=>sessionStorage.getItem('media-harness.guest'));
+  const identity=await(await fetch(base+'/api/sessions/current',{headers:{Authorization:'Bearer '+guestToken}})).json();
+  const map=await(await fetch(base+'/api/offices/'+encodeURIComponent(identity.officeId)+'/map',{headers:{Authorization:'Bearer '+guestToken}})).json();
+  prototypeLayout=map.mapId==='prototype-office';assert(prototypeLayout||map.mapId==='office','Media smoke requires a supported office layout');
+  if(prototypeLayout){await moveRaw(a,20,17.8);await moveRaw(b,21,17.8);await moveRaw(c,20,18.8);}
   await until(async () => await has(a,b) && await has(a,c) && await has(b,a) && await has(b,c), 'three nearby policies');
   await until(async () => (await audioStats(b)).filter(s => s.bytes > 0 && s.energy > 0).length >= 2, 'two actual remote RTP audio streams with energy');
   await until(async () => (await volumes(a)).length === 2 && (await volumes(a)).every(value => value > .98), 'full-gain playback element volumes');
@@ -91,10 +97,12 @@ try {
   console.log('PASS: entry/exit hysteresis and zero-gain band; one LiveKit connection per browser throughout movement.');
   // M3: A and B enter the east meeting room through the doorway (wall x 21-21.5, gap y 6-8); C waits on the floor just outside.
   // Walk along y=3 first to avoid the desk block at x 8-12, y 5-7.
-  for (const [user, x, y] of [[a, 18, 7], [b, 18.5, 7], [c, 19.5, 7]]) { await move(user, x, 3); await move(user, x, y); }
+  if(prototypeLayout){for(const [user,x,y]of [[a,27.2,12.8],[b,27.5,13.2],[c,28.5,12.8]])await moveRaw(user,x,y);}
+  else for (const [user, x, y] of [[a, 18, 7], [b, 18.5, 7], [c, 19.5, 7]]) { await move(user, x, 3); await move(user, x, y); }
   await until(async () => await mode(a) === 'floor' && await has(a,b) && await has(a,c), 'floor policies at the doorway');
   const floorConnects = await connects(c);
-  await move(a, 24, 6.5); await move(b, 24, 7.5);
+  if(prototypeLayout){await moveRaw(a,30.6,12.8);await moveRaw(a,35,14);await moveRaw(b,30.6,12.8);await moveRaw(b,36.5,14);}
+  else {await move(a, 24, 6.5); await move(b, 24, 7.5);}
   await until(async () => (await a.page.locator('#meeting').textContent()).startsWith('In ') && (await b.page.locator('#meeting').textContent()).startsWith('In '), 'meeting entered status');
   await until(async () => await mode(a) === 'meeting' && await mode(b) === 'meeting' && await gainOf(a,b) === '1.00' && await gainOf(b,a) === '1.00', 'meeting policies with each other at gain 1', 30000);
   await until(async () => await connects(a) >= 2 && await connects(b) >= 2, 'transition reconnected both meeting participants');
@@ -106,7 +114,8 @@ try {
   assert.equal(await connects(c), floorConnects, 'floor listener not reconnected by others entering a room');
   console.log('PASS: A and B hear each other privately in the east meeting room; floor listener C hears neither.');
   const bConnects = await connects(b);
-  await move(a, 18, 7);
+  if(prototypeLayout){await moveRaw(a,30.7,14);await moveRaw(a,30.7,12.8);await moveRaw(a,27.2,12.8);}
+  else await move(a, 18, 7);
   await until(async () => await mode(a) === 'floor' && !await has(a,b) && (await a.page.locator('#meeting').textContent()).startsWith('On the open floor'), 'A returns to floor mode');
   await until(async () => await connects(b) > bConnects && await mode(b) === 'meeting', 'B rotates epoch and stays in meeting mode', 30000);
   await until(async () => !await has(b,a) && await attached(a) <= 1, 'A and B no longer hear each other');

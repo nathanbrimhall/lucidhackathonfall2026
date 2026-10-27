@@ -2,6 +2,14 @@
 
 A virtual office where people can walk up to conversations. M2 adds authenticated LiveKit microphone credentials, public-floor proximity audio, verified lifecycle webhooks, and a browser media harness to the shared office and authoritative movement from M1. M3 adds automatic private meeting-room audio. M4 adds opt-in AI meeting notes through a separate worker. M5 adds self-owned reminders with durable delivery and offline catch-up; real-device and second-host deployment checks remain manual acceptance work.
 
+## Test the integrated office frontend
+
+From the repository root, run **npm run office:demo** and open **http://localhost:2568/**. Choose the fictional Nathan, Cameron and Maya accounts in separate windows to test the complete UI/backend flow. The demo seeds private notes and shared work in an isolated in-memory office; restarting resets fixtures without changing the normal database or resetting Gemini usage. Audio capture is disabled in this mode. AI submits only when you click Ask assistant and uses the configured Gemini key.
+
+Use **npm run office:dev** for the persistent office at **http://localhost:2567/** with your configured invite. Real audio additionally requires LiveKit; real AI capture requires AI_ENABLED=true and a worker (npm run office:dev -- --worker). OFFICE_LAYOUT=prototype matches the approved frontend artwork. No external Teams/Slack delivery or video calls are connected.
+
+See [Integrated demo checklist](docs/INTEGRATED_DEMO_CHECKLIST.md) for all eight assistant actions, task/message approval, privacy, optional interruptions, and real-microphone checks. **npm run office:verify** runs typecheck, the production build, all tests and the integrated browser checks with external networking blocked. **npm run office:live-check** is a separate, bounded live Gemini check using fictional data and the persistent quota ledger.
+
 ## Start the AI transcript demo (no Docker required)
 
 From this repository, run `npm run ai:demo` and open http://127.0.0.1:8788/.

@@ -9,7 +9,7 @@
   },
   "scripts": {
     "dev": "tsx watch --env-file=.env server/src/index.ts",
-    "build": "tsc -p tsconfig.build.json && node scripts/copy-assets.cjs && node scripts/build-media-harness.mjs",
+    "build": "tsc -p tsconfig.build.json && node scripts/copy-assets.cjs && node scripts/build-media-harness.mjs && node scripts/build-frontend.mjs",
     "typecheck": "tsc --noEmit",
     "start": "node --env-file-if-exists=.env dist/server/src/index.js",
     "worker:dev": "tsx --env-file=.env worker/src/index.ts",
@@ -24,7 +24,13 @@
     "ai:eval": "tsx --env-file-if-exists=.env tools/ai-eval/cli.ts",
     "ai:verify": "tsx --env-file-if-exists=.env tools/ai-eval/verify.ts",
     "ai:usage": "tsx --env-file-if-exists=.env tools/ai-eval/usage.ts",
-    "setup:local": "node scripts/setup-local.mjs"
+    "setup:local": "node scripts/setup-local.mjs",
+    "office:dev": "node scripts/start-office.mjs",
+    "office:verify": "node scripts/run-offline.mjs scripts/verify-office.mjs",
+    "smoke:office": "node scripts/run-offline.mjs --import tsx tools/integrated-smoke.ts",
+    "build:frontend": "node scripts/build-frontend.mjs",
+    "office:demo": "node scripts/start-office.mjs --fixtures",
+    "office:live-check": "node scripts/run-live-check.mjs"
   },
   "dependencies": {
     "@colyseus/core": "0.18.23",

@@ -1,0 +1,4 @@
+// Explicit live check: credential values load from ignored .env only inside the guarded child.
+import {spawn} from 'node:child_process';import {toolEnvironment} from './tool-environment.mjs';import {resolve} from 'node:path';
+const guard=resolve('scripts/live-gemini-network-guard.cjs').replaceAll('\\','/');
+const child=spawn(process.execPath,['--import','tsx','--env-file-if-exists=.env','tools/office-live-check.ts',...process.argv.slice(2)],{stdio:'inherit',windowsHide:true,env:{...toolEnvironment(),...Object.fromEntries(Object.entries(process.env).filter(([key])=>['http_proxy','https_proxy','all_proxy','no_proxy','node_use_env_proxy','node_extra_ca_certs','ssl_cert_file','ssl_cert_dir'].includes(key.toLowerCase()))),NODE_OPTIONS:'--require "'+guard+'"',OTEL_SDK_DISABLED:'true',DO_NOT_TRACK:'1'}});child.on('error',()=>process.exitCode=1);child.on('exit',code=>process.exitCode=code??1);

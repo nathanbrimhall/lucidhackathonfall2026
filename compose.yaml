@@ -36,12 +36,14 @@ services:
     environment:
       DATABASE_URL: /data/office.sqlite
       OPENAI_API_KEY: ""
-      GEMINI_API_KEY: ""
+      GEMINI_API_KEY: "${GEMINI_API_KEY:-}"
+      AI_USAGE_DATABASE: /usage/ai-usage.sqlite
     init: true
     ports:
       - "${PORT:-2567}:${PORT:-2567}"
     volumes:
       - office-data:/data
+      - office-ai-usage:/usage
     depends_on:
       data-init:
         condition: service_completed_successfully

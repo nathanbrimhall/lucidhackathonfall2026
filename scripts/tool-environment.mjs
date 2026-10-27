@@ -1,0 +1,2 @@
+// Only OS/tool locations reach test processes; application credentials and tracing configuration do not.
+export function toolEnvironment(){const allowed=new Set(['systemroot','windir','path','temp','tmp','userprofile','homedrive','homepath','appdata','localappdata','programfiles','programfiles(x86)','comspec','pathext','number_of_processors','ai_browser_executable']);return Object.fromEntries(Object.entries(process.env).filter(([key])=>allowed.has(key.toLowerCase())));}
