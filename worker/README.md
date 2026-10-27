@@ -2,9 +2,18 @@
 
 This independent TypeScript process claims leased jobs from the application's bearer-authenticated internal API. A capture job joins only its specified isolated LiveKit room, publishes nothing, and subscribes only to the supplied consenting identities' microphone tracks. Each speaker is transcribed separately with segment IDs and session-relative millisecond timestamps.
 
-Copy `.env.example` to `.env`, set `AI_ENABLED=true`, a separate random `AI_WORKER_SECRET` of at least 32 characters, and `OPENAI_API_KEY`. Run `docker compose --profile ai up --build`. The worker has no persistent volume and needs no microphone hardware or GPU. For local development, set `AI_SERVER_URL=http://localhost:2567` and run `npm run worker:dev` alongside the application and LiveKit. The application supplies the internal media URL in capture jobs; browser media URLs must not be used inside Compose.
+Copy `.env.example` to `.env` (or run `npm run setup:local`), set `AI_ENABLED=true`, a separate random `AI_WORKER_SECRET` of at least 32 characters, and `GEMINI_API_KEY`. Run `docker compose --profile ai up --build`. The worker needs no microphone hardware or GPU; under Compose it keeps only its AI usage ledger on a volume. For local development, run `npm run office:dev -- --worker` to start the server and worker together, or `npm run worker:dev` alongside an already running application and LiveKit (`AI_SERVER_URL` defaults to `http://localhost:2567`). The application supplies the internal media URL in capture jobs; browser media URLs must not be used inside Compose.
 
-`AI_PROVIDER_BASE_URL` selects an OpenAI-compatible HTTP API; `AI_TRANSCRIPTION_MODEL` and `AI_SUMMARY_MODEL` configure models independently. The defaults are `gpt-4o-mini-transcribe` and `gpt-4o-mini`. The provider must implement multipart `/audio/transcriptions` and strict JSON Schema `/chat/completions`. Provider credentials remain in the worker environment. References: [OpenAI transcription API](https://developers.openai.com/api/reference/resources/audio/subresources/transcriptions/methods/create) and [Structured Outputs](https://developers.openai.com/api/docs/guides/structured-outputs).
+`AI_PROVIDER` selects `gemini` or `openai`. `.env.example` and Compose select `gemini`; if the variable is unset entirely, the worker falls back to `openai`. Each provider reads its own key (`GEMINI_API_KEY` or `OPENAI_API_KEY`), and there is no automatic fallback between them.
+
+| Provider | Transcription model | Summary model | Endpoint |
+| --- | --- | --- | --- |
+| `gemini` | `gemini-3.5-flash-lite` | `gemini-3.6-flash` | Google's `generativelanguage.googleapis.com/v1beta` API (required) |
+| `openai` | `gpt-4o-mini-transcribe` | `gpt-4o-mini` | `https://api.openai.com/v1`, or any OpenAI-compatible API via `AI_PROVIDER_BASE_URL` |
+
+`AI_TRANSCRIPTION_MODEL` and `AI_SUMMARY_MODEL` override the models independently. With Gemini, `AI_GEMINI_OUTPUT_MODE=json` (the default) supplies the notes schema in the prompt and validates locally, while `schema` uses Gemini's native constrained output. An OpenAI-compatible provider must implement multipart `/audio/transcriptions` and strict JSON Schema `/chat/completions`. Provider credentials remain in the worker environment.
+
+Every provider call is recorded in the local usage ledger (`AI_USAGE_DATABASE`), shared with the assistant and the AI demo. `AI_LOCAL_DAILY_REQUEST_LIMIT` caps this app's own daily requests; it is not the provider's quota. After a provider quota error, calls stay paused until `npm run ai:usage -- --clear-pause`.
 
 The worker holds PCM16 mono 16 kHz audio in memory in bounded 10-second chunks (configurable 1–20 seconds); it never writes raw audio to disk. Incomplete chunks are discarded on stop, roster change, failure, or shutdown. Only finalized authorized segments reach the application. A full chunk may be processing while one next chunk fills per speaker; if processing falls behind, capture fails closed rather than building an audio queue. At most one microphone per allowed identity is processed. One worker handles one active job; run additional replicas for concurrent sessions.
 

@@ -30,6 +30,9 @@ jobs:
   foundation:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      # Every docker compose step uses the loopback LiveKit overlay.
+      COMPOSE_FILE: compose.yaml:deploy/compose.ci.yaml
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
