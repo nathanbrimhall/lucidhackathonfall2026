@@ -2,6 +2,9 @@ import { seedManualDemo } from "./domain/manual-demo.js";
 import { z } from "zod";
 import { CollaborationService, CollaborationError } from "./services/CollaborationService.js";
 import { OfficeAssistant } from "./services/OfficeAssistant.js";
+import { timingSafeEqual } from "node:crypto";
+import { AgentError, AgentRunService } from "./services/AgentRunService.js";
+import { FixtureAgentRuntime } from "../../agent-worker/src/runtime.js";
 // Foundation adapted from create-colyseus-app 0.18.1's TypeScript minimal starter.
 import { createServer } from "node:http";
 import { fileURLToPath } from "node:url";
@@ -35,6 +38,9 @@ export function createApplication(config: Config, roomOptions: OfficeRoomOptions
   const collaboration = new CollaborationService(storage, ai.repo);
   const assistant = new OfficeAssistant(ai.repo,collaboration,integration.assistantEnv,integration.assistantRequest,integration.assistantCooldown);
   const reminders = new ReminderService(new ReminderRepository(storage));
+  const agents = new AgentRunService(storage);
+  const agentFixture = new FixtureAgentRuntime();
+  const agentAbort = new AbortController();
   const demoUsers=integration.manualDemo?seedManualDemo(auth,ai.repo,collaboration,config):undefined;
   const httpServer = createServer();
   let stopping = false;
@@ -43,6 +49,8 @@ export function createApplication(config: Config, roomOptions: OfficeRoomOptions
   let aiTimer: NodeJS.Timeout | undefined;
   let reminderTimer: NodeJS.Timeout | undefined;
   let reconcileTimer: NodeJS.Timeout | undefined;
+  let agentTimer: NodeJS.Timeout | undefined;
+  let agentWorking = false;
   const mediaAbort = new AbortController();
   const compiledHarness = fileURLToPath(new URL("../media-harness/", import.meta.url));
   const harnessPath = existsSync(compiledHarness) ? compiledHarness : fileURLToPath(new URL("../../dist/server/media-harness/", import.meta.url));
@@ -69,9 +77,32 @@ export function createApplication(config: Config, roomOptions: OfficeRoomOptions
         if (stopping || (origin && !config.allowedOrigins.includes(origin))) return new Response(null, { status: 403 });
       },
     }),
-    rooms: { [OFFICE_ROOM]: defineRoom(createOfficeRoom(auth, config.officeId, offices, map, roomOptions, media, ai, reminders)) },
+    rooms: { [OFFICE_ROOM]: defineRoom(createOfficeRoom(auth, config.officeId, offices, map, roomOptions, media, ai, reminders, agents, collaboration)) },
     express: (app) => {
       app.disable("x-powered-by");
+      app.use('/internal/agents', (req, _res, next) => {
+        if (stopping) throw new CollaborationError(503,'Server is shutting down.');
+        const token = req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.slice(7) : '';
+        const expected = config.agentWorkerSecret;
+        if (req.headers.origin || !expected || token.length > 1024 || Buffer.byteLength(token) !== Buffer.byteLength(expected) || !timingSafeEqual(Buffer.from(token),Buffer.from(expected))) throw new AuthError('UNAUTHORIZED','Agent worker authentication required.');
+        next();
+      }, express.json({limit:'64kb',strict:true}));
+      app.post('/internal/agents/jobs/claim',(req,res)=>{
+        const input=z.strictObject({workerId:z.string().min(1).max(128),mode:z.enum(['fixture','live']).default('live'),runtime:z.enum(['gemini','hermes']).default('gemini')}).parse(req.body);
+        res.json({job:input.mode==='fixture'||input.runtime===config.agentRuntime?agents.claim(input.workerId,input.mode):null});
+      });
+      app.post('/internal/agents/jobs/:id/context',(req,res)=>{
+        const input=z.strictObject({leaseToken:z.string().min(1).max(128)}).parse(req.body);
+        res.json(agents.context(req.params.id,input.leaseToken));
+      });
+      app.post('/internal/agents/jobs/:id/complete',(req,res)=>{
+        const input=z.strictObject({leaseToken:z.string().min(1).max(128),result:z.unknown()}).parse(req.body);
+        res.json(agents.apply(req.params.id,input.leaseToken,input.result));
+      });
+      app.post('/internal/agents/jobs/:id/fail',(req,res)=>{
+        const input=z.strictObject({leaseToken:z.string().min(1).max(128),message:z.string().max(2000)}).parse(req.body);
+        res.json(agents.fail(req.params.id,input.leaseToken,input.message));
+      });
       // Verify the exact raw body. Service callbacks bypass browser-origin and
       // guest HTTP rate limits, but still have a bounded payload and signed auth.
       app.post("/api/livekit/webhook", express.text({ type: "application/webhook+json", limit: "64kb" }), async (req, res) => {
@@ -142,10 +173,29 @@ export function createApplication(config: Config, roomOptions: OfficeRoomOptions
         }
         next();
       });
+      app.use('/api/agents',express.json({limit:'64kb',strict:true}));
       app.use(express.json({ limit: "4kb", strict: true }));
       app.get("/api/demo",(_req,res)=>res.json({enabled:!!demoUsers,users:demoUsers?.map(({userId,displayName})=>({userId,displayName}))??[]}));
       if(demoUsers)app.post("/api/demo/session",(req,res)=>{const input=z.strictObject({userId:z.string()}).parse(req.body);const user=demoUsers.find(p=>p.userId===input.userId);if(!user)throw new CollaborationError(404,"Demo identity not found.");res.json(user);});
       const who=(req:express.Request)=>auth.authenticate(bearer(req.headers.authorization));
+      const runtimeStatus=()=>({fixture:true,live:config.agentRuntime!=='fixture'&&!integration.manualDemo,liveVerified:false,provider:config.agentRuntime!=='fixture'&&!integration.manualDemo?'gemini':null,runtime:config.agentRuntime});
+      app.get('/api/agents',(req,res)=>{const identity=who(req);res.json({runs:agents.list(identity),requests:agents.inbox(identity),publications:agents.publications(identity),status:agents.publicStatus(identity.officeId),runtime:runtimeStatus()});});
+      app.get('/api/agents/status',(req,res)=>{const identity=who(req);res.json(agents.publicStatus(identity.officeId));});
+      app.post('/api/agents/runs',(req,res)=>{
+        const identity=who(req);
+        if(req.body?.mode==='live'&&(config.agentRuntime==='fixture'||integration.manualDemo))throw new CollaborationError(503,'Live agents are not enabled. Select the labeled fixture workflow.');
+        res.status(201).json(agents.create(identity,req.body));
+      });
+      app.get('/api/agents/runs/:id',(req,res)=>{
+        const cursor=z.coerce.number().int().min(0).default(0).parse(req.query.cursor);
+        res.json(agents.get(who(req),req.params.id,cursor));
+      });
+      app.post('/api/agents/requests/:id/respond',(req,res)=>res.json(agents.respond(who(req),req.params.id,req.body)));
+      app.post('/api/agents/requests/:id/revise',(req,res)=>res.json(agents.reviseAnswer(who(req),req.params.id,req.body)));
+      app.get('/api/agents/requests/:id/versions',(req,res)=>res.json(agents.answerHistory(who(req),req.params.id)));
+      app.post('/api/agents/runs/:id/cancel',(req,res)=>res.json(agents.cancel(who(req),req.params.id,req.body)));
+      app.patch('/api/agents/runs/:id/artifact',(req,res)=>res.json(agents.editArtifact(who(req),req.params.id,req.body)));
+      app.post('/api/agents/runs/:id/review',(req,res)=>res.json(agents.review(who(req),req.params.id,req.body)));
       app.get("/api/collaboration",(req,res)=>{const identity=who(req);res.json({identity,directory:collaboration.directory(identity),profile:collaboration.profile(identity),tasks:collaboration.tasks(identity),messages:collaboration.messages(identity),notifications:collaboration.notices(identity),drafts:collaboration.drafts(identity),assistantConfigured:assistant.configured(),assistantUsage:assistant.usageStatus()});});
       app.patch("/api/collaboration/profile",(req,res)=>res.json(collaboration.updateProfile(who(req),req.body)));
       app.post("/api/collaboration/tasks",(req,res)=>res.status(201).json(collaboration.createTask(who(req),req.body)));
@@ -211,7 +261,7 @@ export function createApplication(config: Config, roomOptions: OfficeRoomOptions
       const frontendPath=existsSync(compiledFrontend)?compiledFrontend:fileURLToPath(new URL("../../dist/server/frontend/",import.meta.url));
       app.use("/",express.static(frontendPath,{index:"index.html",setHeaders:res=>{res.setHeader("X-Content-Type-Options","nosniff");res.setHeader("Referrer-Policy","same-origin");}}));
       const handleError: ErrorRequestHandler = (error, _req, res, _next) => {
-        if(error instanceof CollaborationError){res.status(error.status).json(errorBody(error.status===404?"NOT_FOUND":error.status===403?"FORBIDDEN":error.status===409?"CONFLICT":error.status===429?"RATE_LIMITED":"INVALID_INPUT",error.message));return;}
+        if(error instanceof CollaborationError||error instanceof AgentError){res.status(error.status).json(errorBody(error.status===503?"UNAVAILABLE":error.status===404?"NOT_FOUND":error.status===403?"FORBIDDEN":error.status===409?"CONFLICT":error.status===429?"RATE_LIMITED":"INVALID_INPUT",error.message));return;}
         if(error instanceof z.ZodError){res.status(400).json(errorBody("INVALID_INPUT","Invalid request fields."));return;}
         if (error instanceof ReminderError) {
           const status = error.code === "INVALID_INPUT" ? 400 : error.code === "FORBIDDEN" ? 403 : error.code === "NOT_FOUND" ? 404 : error.code === "CONFLICT" ? 409 : 503;
@@ -261,6 +311,20 @@ export function createApplication(config: Config, roomOptions: OfficeRoomOptions
       scheduleReminders();
       reminderTimer = setInterval(scheduleReminders, 1000);
       reminderTimer.unref();
+      const runFixture = async () => {
+        if (agentWorking || stopping) return;
+        agentWorking=true;
+        try {
+          const job=agents.claim('office-fixture','fixture');
+          if(job){
+            try {const result=await agentFixture.turn(agents.context(job.runId,job.leaseToken),agentAbort.signal);if(!stopping)agents.apply(job.runId,job.leaseToken,result);}
+            catch {if(!stopping)try{agents.fail(job.runId,job.leaseToken,'Fixture turn failed.');}catch{/* A cancellation already invalidated this turn. */}}
+          }
+        } catch { log('agent.maintenance.failed'); }
+        finally {agentWorking=false;}
+      };
+      agentTimer=setInterval(()=>void runFixture(),500);agentTimer.unref();
+      void runFixture();
       void checkMedia();
       mediaTimer = setInterval(() => void checkMedia(), 10_000);
       mediaTimer.unref();
@@ -277,6 +341,8 @@ export function createApplication(config: Config, roomOptions: OfficeRoomOptions
       stopping = true;
       if (aiTimer) clearInterval(aiTimer);
       if (reminderTimer) clearInterval(reminderTimer);
+      if (agentTimer) clearInterval(agentTimer);
+      agentAbort.abort();
       reminders.shutdown();
       ai.shutdown();
       if (mediaTimer) clearInterval(mediaTimer);

@@ -88,7 +88,16 @@ export interface OfficeState {
   players: Record<string, PlayerState>;
   /** Keyed by zoneId, present only while occupied. */
   meetings: Record<string, MeetingIndicator>;
+  /** Separate service principal; never included in players or audio rosters. */
+  agents: Record<string, AgentAvatarState>;
 }
+
+export interface AgentAvatarState {
+  agentId: string; x: number; y: number;
+  state: string; badge: string; sponsorUserId: string;
+}
+/** Private availability-gated notification; retrieve the authorized request over HTTP. */
+export interface AgentRequestNotice { requestId: string }
 
 
 export type AIStatusName = "requesting_consent" | "capturing" | "paused" | "processing" | "completed" | "canceled" | "failed";

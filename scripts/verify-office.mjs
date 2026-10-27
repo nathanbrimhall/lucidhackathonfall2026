@@ -2,7 +2,7 @@ import {spawn} from 'node:child_process';
 import {mkdir,writeFile} from 'node:fs/promises';
 if(process.env.OFFICE_TEST_OFFLINE!=='1')throw new Error('Run through scripts/run-offline.mjs to block external networking.');
 const browserOnly=process.argv.includes('--browsers-only');
-const browsers=[['integrated browser',['--import','tsx','tools/integrated-smoke.ts']],['manual demo browser',['--import','tsx','tools/manual-demo-smoke.ts']]];
+const browsers=[['integrated browser',['--import','tsx','tools/integrated-smoke.ts']],['manual demo browser',['--import','tsx','tools/manual-demo-smoke.ts']],['agent browser',['--import','tsx','tools/agent-smoke.ts']]];
 const steps=browserOnly?[['frontend',['scripts/build-frontend.mjs']],...browsers]:[
  ['typecheck',['node_modules/typescript/bin/tsc','--noEmit']],
  ['compile',['node_modules/typescript/bin/tsc','-p','tsconfig.build.json']],

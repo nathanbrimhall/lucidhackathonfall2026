@@ -6,7 +6,8 @@
     "worker/src/**/*.ts",
     "tools/ai-media-smoke.ts",
     "tools/ai-demo/**/*.ts",
-    "tools/ai-eval/**/*.ts"
+    "tools/ai-eval/**/*.ts",
+    "agent-worker/src/**/*.ts"
   ],
   "exclude": [
     "server/test",

@@ -20,6 +20,7 @@ Lucid is a pixel-art virtual office where remote teammates can see each other, w
   - prepare meeting questions
 
   Every answer cites its sources, and nothing changes until you confirm it.
+- **Shared agent.** Delegate a scoped launch brief, ask up to two named teammates through a durable private inbox, review attributed drafts and approve exact-revision office publication. The default adapter is a clearly labeled deterministic fixture; explicit bounded Hermes and direct Gemini workers are available. Respondents can correct or replace private answers with shareable versions; independent draft work continues as replies arrive. See [agent setup and rehearsal](docs/AGENT_IMPLEMENTATION.md).
 - **Presence.** Set yourself to Available, Away or Do Not Disturb, share a short focus/skills line, and choose whether new messages should interrupt you.
 
 Teams/Slack delivery, video calls and audio playback are not part of this project. Messages are delivered inside the office.
@@ -132,6 +133,8 @@ Two endpoints show the server's state: `/healthz` reports liveness, and `/readyz
 
 ### Sharing with other devices
 
+For collaborators connecting to your laptop over LAN, use the [persistent LAN launcher and certificate instructions](docs/OFFICE_LAN.md). It serves the office and LiveKit signaling through HTTPS/WSS; separate-device audio still needs verification.
+
 Other machines can't reach your computer through `localhost`. To let them connect:
 
 - Set `PUBLIC_SERVER_URL`, `ALLOWED_ORIGINS` and `LIVEKIT_PUBLIC_URL` to addresses they can reach.
@@ -157,6 +160,7 @@ All settings live in `.env`. `.env.example` lists every setting with comments, a
 | `AI_TRANSCRIPTION_MODEL`, `AI_SUMMARY_MODEL` | Models used for transcription and note writing |
 | `AI_TIMEZONE` | Timezone used to interpret spoken deadlines such as "by Friday" |
 | `AI_LOCAL_DAILY_REQUEST_LIMIT` | This app's own daily cap on AI requests |
+| `AGENT_RUNTIME`, `AGENT_WORKER_SECRET`, `AGENT_SERVER_URL` | Fixture by default; explicit Gemini worker mode, dedicated worker secret and office address |
 
 To check your AI setup without calling the provider, run `node scripts/check-ai-setup.mjs`.
 
@@ -186,6 +190,14 @@ This opens a separate playground at **http://127.0.0.1:8788/**. It isn't connect
 | `npm run typecheck` | TypeScript checks |
 | `npm test` | Unit and integration tests (Vitest) |
 | `npm run office:verify` | Typecheck, build, all tests and browser checks, with external network blocked |
+| `npm run agent:dev` | Separate live Hermes/Gemini agent worker (explicit configuration required) |
+| `npm run office:lan` | Persistent office with supplied LAN host and TLS certificate |
+| `npm run agent:deployment-check -- --allow-lan` | Read-only LAN HTTPS/readiness/TLS preflight |
+| `npm run agent:acceptance-check -- record.json` | Validate a completed human rehearsal record |
+| `npm run agent:verify:hermes` | Real pinned Hermes with a synthetic counted provider; requires installed runtime |
+| `npm run smoke:agents` | Offline two-session agent question/reply/review/publication browser check |
+| `npm run agent:live-check -- --live` | Explicit two-request maximum live check with fictional data and existing quota |
+| `npm run agent:live-check -- --live --runtime hermes --edits` | Explicit three-request maximum Hermes question/reply/edit check |
 | `npm run smoke` | Multiplayer check against a running server, using the Colyseus SDK |
 | `npm run smoke:media` | Proximity and meeting audio check with synthetic microphones in Chromium (needs `npx playwright install chromium` and a running stack) |
 | `npm run smoke:reminders` | Reminder delivery and offline catch-up check |
@@ -199,6 +211,7 @@ GitHub Actions runs the typecheck, tests, build, Docker Compose startup and all 
 frontend/   Browser client: office renderer, panels, Colyseus and LiveKit wiring
 server/     Colyseus and Express server: auth, rooms, media, notes, tasks, reminders, assistant
 shared/     Protocol types, validation, map and collision logic used by server and client
+agent-worker/ Bounded shared-agent fixture/Hermes/Gemini adapters and separate live worker
 worker/     AI worker: joins meeting audio, transcribes, drafts notes
 tools/      Demo servers, AI lab and evaluation, smoke tests, the media test harness
 scripts/    Build, setup and verification helpers

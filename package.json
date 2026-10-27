@@ -32,7 +32,17 @@
     "smoke:office": "node scripts/run-offline.mjs --import tsx tools/integrated-smoke.ts",
     "build:frontend": "node scripts/build-frontend.mjs",
     "office:demo": "node scripts/start-office.mjs --fixtures",
-    "office:live-check": "node scripts/run-live-check.mjs"
+    "office:live-check": "node scripts/run-live-check.mjs",
+    "agent:dev": "tsx --env-file-if-exists=.env agent-worker/src/index.ts",
+    "agent:start": "node --env-file-if-exists=.env dist/agent-worker/src/index.js",
+    "smoke:agents": "node scripts/run-offline.mjs --import tsx tools/agent-smoke.ts",
+    "agent:live-check": "tsx --env-file-if-exists=.env tools/agent-live-check.ts",
+    "agent:deployment-check": "tsx --env-file-if-exists=.env tools/agent-deployment-check.ts",
+    "agent:acceptance-check": "tsx tools/agent-acceptance-check.ts",
+    "agent:acceptance-init": "tsx tools/agent-acceptance-init.ts",
+    "office:lan": "node scripts/start-office-lan.mjs",
+    "office:lan:setup": "node scripts/office-lan-setup.mjs",
+    "agent:verify:hermes": "node --env-file-if-exists=.env scripts/verify-hermes.mjs"
   },
   "dependencies": {
     "@colyseus/core": "0.18.23",

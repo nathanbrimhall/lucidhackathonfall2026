@@ -1,0 +1,86 @@
+import { afterEach, expect, it, vi } from 'vitest';
+import { createApplication } from '../src/app.config.js';
+import { loadConfig } from '../src/config.js';
+import { LiveKitService } from '../src/services/LiveKitService.js';
+import { AgentAvatarController } from '../src/services/AgentAvatarController.js';
+import { loadOfficeMap } from '../src/domain/map.js';
+import { isPositionWalkable } from '../../shared/src/collision.js';
+import { Client, type Room } from '@colyseus/sdk';
+const testEnv={PUBLIC_SERVER_URL:'http://localhost:2567',ALLOWED_ORIGINS:'http://localhost:2567',SESSION_SECRET:'test-only-session-secret-at-least-32-characters',DATABASE_URL:':memory:',GUEST_INVITE_CODE:'test-invite-code',OFFICE_ID:'demo-office',LIVEKIT_INTERNAL_URL:'http://127.0.0.1:1',LIVEKIT_PUBLIC_URL:'ws://localhost:7880',LIVEKIT_API_KEY:'testkey',LIVEKIT_API_SECRET:'test-only-livekit-secret-at-least-32-characters'};
+let app:ReturnType<typeof createApplication>|undefined;
+afterEach(async()=>{await app?.stop();app=undefined;});
+it('finishes a fixture across authenticated users with attributed answers and exact revision publication',async()=>{
+ const config=loadConfig({...testEnv,AGENT_WORKER_SECRET:'distinct-agent-worker-secret-at-least-32-characters',OFFICE_LAYOUT:'prototype'});
+ app=createApplication(config,{},new LiveKitService(config,{backend:{issueToken:vi.fn(async()=>''),removeParticipant:vi.fn(async()=>{}),deleteRoom:vi.fn(async()=>{}),verifyWebhook:vi.fn(async()=>{throw Error('unused');})}}),{assistantEnv:{}});
+ const base=`http://127.0.0.1:${await app.start(0,'127.0.0.1')}`;
+ const call=async(path:string,token?:string,body?:unknown,method?:string)=>{const response=await fetch(base+path,{method:method??(body===undefined?'GET':'POST'),headers:{...(token?{Authorization:`Bearer ${token}`} :{}),'Content-Type':'application/json'},...(body===undefined?{}:{body:JSON.stringify(body)})});return{status:response.status,data:await response.json()};};
+ const guest=async(displayName:string)=>(await call('/api/sessions/guest',undefined,{displayName,inviteCode:config.inviteCode})).data;
+ const a=await guest('Cameron'),b=await guest('Nathan'),c=await guest('Unrelated');
+ const rooms:Room[]=[];
+ for(const person of [a,b]) {
+  const seat=await call('/api/offices/demo-office/join',person.token,{protocolVersion:1});
+  const room=await new Client(base).consumeSeatReservation(seat.data);
+  room.onMessage('session.ready',()=>{});room.onMessage('audio.policy',()=>{});room.onMessage('media.transition',()=>{});
+  rooms.push(room);
+ }
+ const [requesterRoom,recipientRoom]=rooms;
+ const notices:unknown[]=[];recipientRoom.onMessage('agent.request',value=>notices.push(value));
+ await call('/api/collaboration/profile',b.token,{allowInterrupt:true},'PATCH');
+ recipientRoom.send('player.status',{status:'busy'});
+ expect((await call('/api/agents')).status).toBe(401);
+ expect((await call('/internal/agents/jobs/claim',a.token,{workerId:'browser'})).status).toBe(401);
+ const create={requestId:'goal-one',goal:'Prepare a demo launch brief',taskIds:[],contactUserIds:[b.userId],audience:'office',mode:'fixture'};
+ const started=await call('/api/agents/runs',a.token,create);expect(started.status).toBe(201);const runId=started.data.id;
+ expect((await call('/api/agents/runs',a.token,create)).data.id).toBe(runId);
+ expect((await call('/api/agents/runs/'+runId,c.token)).status).toBe(404);
+ let request:any;
+ await vi.waitFor(async()=>{request=(await call('/api/agents',b.token)).data.requests[0];expect(request).toBeDefined();},{timeout:4000,interval:100});
+ await new Promise(resolve=>setTimeout(resolve,1100));expect(notices).toEqual([]);
+ recipientRoom.send('player.status',{status:'available'});
+ await vi.waitFor(()=>expect(notices).toEqual([{requestId:request.id}]),{timeout:3000,interval:100});
+ await vi.waitFor(()=>{
+  const left=(requesterRoom.state as any).agents?.get('office-agent'),right=(recipientRoom.state as any).agents?.get('office-agent');
+  expect(left).toBeDefined();expect(right).toBeDefined();expect(Math.abs(left.x-right.x)).toBeLessThan(.3);expect(Math.abs(left.y-right.y)).toBeLessThan(.3);
+ });
+ const shared=JSON.stringify((requesterRoom.state as any).toJSON());expect(shared).not.toContain(create.goal);expect(shared).not.toContain(request.question);
+ expect((await call('/api/agents',c.token)).data.requests).toEqual([]);
+ const response={requestId:'answer-one',revision:request.revision,decision:'answer',answer:'Office URL: https://office.example.test (supplied/unverified)\nJoin instructions: Join with the shared invite.\nNear audio: Walk together and verify both voices.\nFar audio: Walk six tiles apart and verify attenuation.\nPrivate-room audio: Enter together and verify an outside person cannot hear.\nKnown issues: Browser playback may need a click.',allowPublication:true};
+ expect((await call('/api/agents/requests/'+request.id+'/respond',c.token,response)).status).toBe(404);
+ expect((await call('/api/agents/requests/'+request.id+'/respond',b.token,response)).status).toBe(200);
+ expect((await call('/api/agents/requests/'+request.id+'/respond',b.token,response)).status).toBe(200);
+ let detail:any;
+ await vi.waitFor(async()=>{detail=(await call('/api/agents/runs/'+runId,a.token)).data;expect(detail.run.state).toBe('ready_for_review');},{timeout:4000,interval:100});
+ expect(detail.artifact.content).toContain(response.answer);expect(detail.artifact.evidence).toContainEqual({type:'answer',id:request.id,revision:request.revision});
+ expect((await call('/api/agents',c.token)).data.publications).toEqual([]);
+ expect((await call('/api/agents/runs/'+runId+'/review',a.token,{requestId:'stale',revision:detail.artifact.revision+1,decision:'approve'})).status).toBe(409);
+ const approved={requestId:'publish-one',revision:detail.artifact.revision,decision:'approve'};
+ expect((await call('/api/agents/runs/'+runId+'/review',a.token,approved)).status).toBe(200);
+ expect((await call('/api/agents/runs/'+runId+'/review',a.token,approved)).status).toBe(200);
+ const published=(await call('/api/agents',c.token)).data;
+ expect(published.publications).toHaveLength(1);expect(published.publications[0].content).toContain(response.answer);
+ expect(JSON.stringify(published.status)).not.toContain(response.answer);expect(JSON.stringify(published.status)).not.toContain(create.goal);
+ expect((await call('/api/agents/runs/'+runId,a.token)).data.run.modelCalls).toBe(0);
+ for(const room of rooms)await room.leave();
+});
+it('keeps one generic, walkable avatar independent of audio and human collision',()=>{
+ const map=loadOfficeMap('prototype'),controller=new AgentAvatarController(map),home={x:controller.avatar.x,y:controller.avatar.y};
+ controller.update({state:'waiting',sponsorUserId:'sponsor'},map.spawnPoints[1]??{x:home.x+2,y:home.y});
+ for(let i=0;i<300;i++){controller.tick(50);expect(isPositionWalkable(map,controller.avatar)).toBe(true);}
+ expect(Object.keys(controller.avatar).sort()).toEqual(['agentId','badge','sponsorUserId','state','x','y'].sort());
+ controller.update({state:'idle'});for(let i=0;i<500;i++)controller.tick(50);
+ expect(controller.avatar.x).toBe(home.x);expect(controller.avatar.y).toBe(home.y);
+});
+it('binds live worker claims to the configured runtime and reports Hermes separately from its provider',async()=>{
+ const secret='distinct-agent-worker-secret-at-least-32-characters';
+ const config=loadConfig({...testEnv,AGENT_RUNTIME:'hermes',AGENT_WORKER_SECRET:secret});
+ app=createApplication(config,{},new LiveKitService(config,{backend:{issueToken:vi.fn(async()=>''),removeParticipant:vi.fn(async()=>{}),deleteRoom:vi.fn(async()=>{}),verifyWebhook:vi.fn(async()=>{throw Error('unused');})}}),{assistantEnv:{}});
+ const base=`http://127.0.0.1:${await app.start(0,'127.0.0.1')}`;
+ const post=async(path:string,body:unknown,token?:string)=>{const response=await fetch(base+path,{method:'POST',headers:{'Content-Type':'application/json',...(token?{Authorization:`Bearer ${token}`}:{})},body:JSON.stringify(body)});expect(response.ok).toBe(true);return response.json();};
+ const guest=await post('/api/sessions/guest',{displayName:'Cameron',inviteCode:config.inviteCode});
+ const run=await post('/api/agents/runs',{requestId:'hermes-binding',goal:'Prepare a scoped brief',taskIds:[],contactUserIds:[],mode:'live'},guest.token);
+ const status=await (await fetch(base+'/api/agents',{headers:{Authorization:`Bearer ${guest.token}`}})).json();
+ expect(status.runtime).toMatchObject({live:true,liveVerified:false,provider:'gemini',runtime:'hermes'});
+ expect((await post('/internal/agents/jobs/claim',{workerId:'wrong',mode:'live',runtime:'gemini'},secret)).job).toBeNull();
+ expect((await post('/internal/agents/jobs/claim',{workerId:'legacy-gemini',mode:'live'},secret)).job).toBeNull();
+ expect((await post('/internal/agents/jobs/claim',{workerId:'correct',mode:'live',runtime:'hermes'},secret)).job.runId).toBe(run.id);
+});

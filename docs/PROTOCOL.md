@@ -226,3 +226,14 @@ The integrated frontend also uses these authenticated endpoints. Their payloads 
 - Between an epoch rotation and deletion of the old room there is a short window in which the retired room still exists.
 - Each departure from a multi-person meeting causes a brief reconnect for the people who stay.
 - Video is a placeholder: `videoCallActive` is always false.
+
+
+## Shared agent assignments
+
+The office now synchronizes a separate `agents` map: `{agentId,x,y,state,badge,sponsorUserId}`. Agents never appear in `players`, meeting rosters or audio policies. State is generic; detailed assignments and inbox items follow authenticated HTTP access checks. A private, availability-gated `agent.request` event carries only `{requestId}` and prompts inbox refresh. Durable inbox access does not depend on that event or on avatar proximity.
+
+See [agent implementation](AGENT_IMPLEMENTATION.md#persistence-and-api) for the versioned browser/worker API, authorization, event cursor, request budgets and exact-revision publication contract.
+
+Agent respondents may voluntarily replace a current unexpired answer through `POST /api/agents/requests/:id/revise` with `{requestId, revision, answer, allowPublication}`. This increments the answer revision and supersedes the draft; only the original respondent may submit it. `GET /api/agents/requests/:id/versions` returns the retained answer history only to that respondent or the assignment requester. Declined requests stay closed, and completed/canceled assignments cannot resume.
+
+A worker result may include both questions and an independent partial draft in one terminal turn. The server persists them together, then releases the lease while requests are open. Each actual response queues one continuation; polling an inbox never queues model work. A response arriving during inference invalidates the older lease. Corrected answers rebuild without superseded artifacts or earlier review comments.

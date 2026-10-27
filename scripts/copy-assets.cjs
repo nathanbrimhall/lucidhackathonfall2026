@@ -1,5 +1,7 @@
 const { cpSync, mkdirSync } = require("node:fs");
 mkdirSync("dist/server", { recursive: true });
+mkdirSync("dist/agent-worker/src", { recursive: true });
+cpSync("agent-worker/src/hermes_bridge.py", "dist/agent-worker/src/hermes_bridge.py");
 cpSync("server/migrations", "dist/server/migrations", { recursive: true });
 cpSync("server/maps", "dist/server/maps", { recursive: true });
 mkdirSync("dist/tools/ai-demo", { recursive: true });

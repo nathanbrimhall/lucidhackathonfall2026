@@ -3,7 +3,7 @@ import { Room,RoomEvent,Track,RemoteAudioTrack,DisconnectReason,setLogLevel,LogL
 import type { OfficeMap,Point } from "../shared/src/map-contract.js";
 import type { GuestIdentity,GuestSession,PlayerState,AIStatus,AudioPolicy,MediaCredentials,MediaTransition } from "../shared/src/protocol.js";
 import { planPath } from "../shared/src/navigation.js";
-type State={players:{values():IterableIterator<PlayerState>;get(id:string):PlayerState|undefined};meetings:{get(id:string):{occupancy:number;meetingSessionId:string}|undefined}};
+type State={players:{values():IterableIterator<PlayerState>;get(id:string):PlayerState|undefined};meetings:{get(id:string):{occupancy:number;meetingSessionId:string}|undefined};agents?:{values():IterableIterator<{agentId:string;x:number;y:number;state:string;badge:string;sponsorUserId:string}>}};
 export class ApiError extends Error{constructor(readonly code:string,message:string){super(message);}}
 setLogLevel(LogLevel.silent);
 export class OfficeClient{
@@ -18,6 +18,7 @@ export class OfficeClient{
   try{this.identity=await this.api<GuestIdentity>('/api/sessions/current');this.map=await this.api<OfficeMap>(`/api/offices/${encodeURIComponent(this.identity.officeId)}/map`);if(this.map.mapId!=="prototype-office")throw new Error("This frontend requires OFFICE_LAYOUT=prototype. The media harness supports the legacy layout.");const seat=await this.api(`/api/offices/${encodeURIComponent(this.identity.officeId)}/join`,{protocolVersion:1});const room=await new Client(location.origin).consumeSeatReservation<State>(seat);if(generation!==this.generation){await room.leave();return;}this.room=room;this.seq=0;
    const on=(type:string,handler:(value:any)=>void)=>room.onMessage(type,value=>{if(generation===this.generation&&this.room===room)handler(value);});
    on('session.ready',()=>{});on('request.error',(error:any)=>{this.event('error',error);});
+   on('agent.request',(request:any)=>this.event('agent.request',request));
    on('meeting.entered',(m:any)=>{this.meetingId=m.meetingSessionId;this.ai=undefined;this.changed();});on('meeting.exited',()=>{this.meetingId='';this.ai=undefined;this.changed();});
    on('ai.status',(s:AIStatus)=>{if(s.meetingSessionId!==this.meetingId||this.ai?.aiSessionId===s.aiSessionId&&s.revision<this.ai.revision)return;this.ai=s;this.changed();});
    on('notes.ready',(data:any)=>this.event('notes.ready',data));on('reminder.due',(notice:any)=>{this.event('reminder.due',notice);room.send('reminder.ack',{notificationId:notice.notificationId});});

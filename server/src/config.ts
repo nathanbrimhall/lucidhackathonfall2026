@@ -9,6 +9,8 @@ const url = (protocols: string[]) => z.string().url().refine((value) => {
 });
 const httpUrl = url(["http:", "https:"]);
 const envSchema = z.object({
+  AGENT_RUNTIME: z.enum(["fixture", "gemini", "hermes"]).default("fixture"),
+  AGENT_WORKER_SECRET: z.preprocess(value => value === "" ? undefined : value, z.string().min(32).max(1024).optional()),
   OFFICE_LAYOUT: z.enum(["legacy","prototype"]).default("prototype"),
   AI_TIMEZONE: z.string().default("UTC").refine(value => { try { new Intl.DateTimeFormat("en", { timeZone: value }); return true; } catch { return false; } }),
   AI_ENABLED: z.enum(["true", "false"]).default("false"),
@@ -17,6 +19,7 @@ const envSchema = z.object({
   AI_MAX_TRANSCRIPT_CHARS: z.coerce.number().int().min(1000).max(500000).default(100000),
   AI_MAX_CONCURRENT_SESSIONS: z.coerce.number().int().min(1).max(10).default(2),
   PORT: z.coerce.number().int().min(1).max(65535).default(2567),
+  BIND_HOST: z.enum(["127.0.0.1", "0.0.0.0", "::1", "::"]).default("0.0.0.0"),
   PUBLIC_SERVER_URL: httpUrl,
   ALLOWED_ORIGINS: z.string().min(1).transform((value) => value.split(",").map((origin) => origin.trim())).pipe(z.array(httpUrl.refine((origin) => { try { return new URL(origin).origin === origin; } catch { return false; } })).min(1)),
   SESSION_SECRET: z.string().min(32).max(1024),
@@ -36,16 +39,19 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     throw new Error(`Invalid configuration: ${[...new Set(result.error.issues.map((issue) => issue.path.join(".")))].join(", ")}`);
   }
   const e = result.data;
+  if (e.AGENT_RUNTIME !== "fixture" && !e.AGENT_WORKER_SECRET) throw new Error("Invalid configuration: AGENT_WORKER_SECRET required for live agents");
+  if (e.AGENT_WORKER_SECRET && [e.SESSION_SECRET, e.LIVEKIT_API_SECRET, e.AI_WORKER_SECRET].includes(e.AGENT_WORKER_SECRET)) throw new Error("Invalid configuration: AGENT_WORKER_SECRET must be distinct");
   if (e.AI_ENABLED === "true" && !e.AI_WORKER_SECRET) throw new Error("Invalid configuration: AI_WORKER_SECRET required when AI_ENABLED=true");
   if (e.AI_WORKER_SECRET && [e.SESSION_SECRET, e.LIVEKIT_API_SECRET].includes(e.AI_WORKER_SECRET)) throw new Error("Invalid configuration: AI_WORKER_SECRET must be distinct");
   if (e.DATABASE_URL.includes("://")) throw new Error("Invalid configuration: DATABASE_URL must be a SQLite file path");
   return {
+    agentRuntime: e.AGENT_RUNTIME, agentWorkerSecret: e.AGENT_WORKER_SECRET,
     officeLayout: e.OFFICE_LAYOUT,
     aiTimeZone: e.AI_TIMEZONE,
     aiEnabled: e.AI_ENABLED === "true", aiWorkerSecret: e.AI_WORKER_SECRET,
     aiMaxDurationSeconds: e.AI_MAX_DURATION_SECONDS, aiMaxTranscriptChars: e.AI_MAX_TRANSCRIPT_CHARS,
     aiMaxConcurrentSessions: e.AI_MAX_CONCURRENT_SESSIONS,
-    port: e.PORT, publicServerUrl: e.PUBLIC_SERVER_URL, allowedOrigins: e.ALLOWED_ORIGINS,
+    port: e.PORT, bindHost: e.BIND_HOST, publicServerUrl: e.PUBLIC_SERVER_URL, allowedOrigins: e.ALLOWED_ORIGINS,
     sessionSecret: e.SESSION_SECRET, databasePath: e.DATABASE_URL === ":memory:" ? ":memory:" : resolve(e.DATABASE_URL),
     inviteCode: e.GUEST_INVITE_CODE, officeId: e.OFFICE_ID,
     livekitInternalUrl: e.LIVEKIT_INTERNAL_URL, livekitPublicUrl: e.LIVEKIT_PUBLIC_URL,

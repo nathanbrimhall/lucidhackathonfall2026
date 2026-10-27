@@ -11,14 +11,23 @@ export const testEnv = {
 };
 
 describe("startup configuration", () => {
+  it('keeps agents fictional by default and requires a distinct secret for live work', () => {
+    expect(loadConfig({...testEnv,AGENT_WORKER_SECRET:''}).agentRuntime).toBe('fixture');
+    expect(()=>loadConfig({...testEnv,AGENT_RUNTIME:'hermes'})).toThrow('AGENT_WORKER_SECRET');
+    expect(loadConfig({...testEnv,AGENT_RUNTIME:'hermes',AGENT_WORKER_SECRET:'dedicated-agent-secret-at-least-32-characters'}).agentRuntime).toBe('hermes');
+    expect(()=>loadConfig({...testEnv,AGENT_RUNTIME:'gemini'})).toThrow('AGENT_WORKER_SECRET');
+    expect(()=>loadConfig({...testEnv,AGENT_RUNTIME:'gemini',AGENT_WORKER_SECRET:testEnv.SESSION_SECRET})).toThrow('distinct');
+    expect(loadConfig({...testEnv,AGENT_RUNTIME:'gemini',AGENT_WORKER_SECRET:'dedicated-agent-secret-at-least-32-characters'}).agentRuntime).toBe('gemini');
+  });
   it("validates URLs and parses port and origin lists", () => {
-    const config = loadConfig({ ...testEnv, PORT: "3000" });
+    const config = loadConfig({ ...testEnv, PORT: "3000", BIND_HOST: "127.0.0.1" });
     expect(config.port).toBe(3000);
+    expect(config.bindHost).toBe("127.0.0.1");
     expect(config.allowedOrigins).toEqual(["http://localhost:2567", "http://localhost:5173"]);
   });
   it.each([
     ["SESSION_SECRET", "short"], ["GUEST_INVITE_CODE", ""], ["PORT", "NaN"], ["PORT", "0"],
-    ["ALLOWED_ORIGINS", "*"], ["ALLOWED_ORIGINS", "http://localhost:2567/path"],
+    ["ALLOWED_ORIGINS", "*"], ["ALLOWED_ORIGINS", "http://localhost:2567/path"], ["BIND_HOST", "lan.example"],
     ["PUBLIC_SERVER_URL", "ftp://example.com"], ["LIVEKIT_PUBLIC_URL", "http://localhost:7880"],
     ["LIVEKIT_INTERNAL_URL", "http://user:secret@localhost:7880"], ["LIVEKIT_API_SECRET", "short"],
     ["DATABASE_URL", "postgres://localhost/db"], ["OFFICE_ID", "../other"],

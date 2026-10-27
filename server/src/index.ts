@@ -18,7 +18,7 @@ async function main() {
   };
   process.once("SIGTERM", () => void shutdown());
   process.once("SIGINT", () => void shutdown());
-  try { await app.start(); log("server.started", { port: config.port }); }
+  try { await app.start(config.port, config.bindHost); log("server.started", { host: config.bindHost, port: config.port }); }
   catch { await app.stop(); throw new Error("Server failed to start"); }
 }
 

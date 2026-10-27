@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "deployment": {
+    "networkScope": null,
+    "officeUrl": null,
+    "livekitUrl": null,
+    "joinInstructions": null,
+    "checks": {
+      "https": { "result": "not_run", "observedAt": null, "evidence": null },
+      "health": { "result": "not_run", "observedAt": null, "evidence": null },
+      "readiness": { "result": "not_run", "observedAt": null, "evidence": null },
+      "wssTls": { "result": "not_run", "observedAt": null, "evidence": null },
+      "separateDevices": { "result": "not_run", "observedAt": null, "evidence": null },
+      "nearAudio": { "result": "not_run", "observedAt": null, "evidence": null },
+      "farAudio": { "result": "not_run", "observedAt": null, "evidence": null },
+      "privateRoomIsolation": { "result": "not_run", "observedAt": null, "evidence": null }
+    }
+  },
+  "rehearsal": {
+    "performedAt": null,
+    "gitRevision": null,
+    "serverVersion": null,
+    "runtime": {
+      "name": null,
+      "revision": null,
+      "mode": null,
+      "provider": null,
+      "model": null,
+      "modelCalls": null
+    },
+    "participants": [],
+    "goal": { "requesterId": null, "realAssignment": false, "evidence": null },
+    "question": { "fromId": null, "toId": null, "crossUserQuestion": false, "evidence": null },
+    "answer": { "responderId": null, "realAnswer": false, "evidence": null },
+    "brief": { "artifactRevision": null, "evidenceLinked": false, "reviewDecision": null, "evidence": null },
+    "scenarios": {
+      "offlineBusyDelivery": { "result": "not_run", "evidence": null, "notes": null },
+      "restartDuringWait": { "result": "not_run", "evidence": null, "notes": null },
+      "rejection": { "result": "not_run", "evidence": null, "notes": null },
+      "requestedEdits": { "result": "not_run", "evidence": null, "notes": null },
+      "cancellation": { "result": "not_run", "evidence": null, "notes": null },
+      "lateReply": { "result": "not_run", "evidence": null, "notes": null },
+      "changedOrExpiredApproval": { "result": "not_run", "evidence": null, "notes": null },
+      "providerOrBudgetFailure": { "result": "not_run", "evidence": null, "notes": null }
+    }
+  }
+}

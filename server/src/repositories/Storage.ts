@@ -32,7 +32,7 @@ export class Storage {
     // BEGIN IMMEDIATE serializes concurrent migration commands across processes.
     const migrate = this.db.transaction(() => {
       this.db.exec("CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)");
-      for (const [version, file] of [[1, "001_identity.sql"], [2, "002_ai_notes.sql"], [3, "003_reminders.sql"], [4, "004_collaboration.sql"]] as const) {
+      for (const [version, file] of [[1, "001_identity.sql"], [2, "002_ai_notes.sql"], [3, "003_reminders.sql"], [4, "004_collaboration.sql"], [5, "005_agents.sql"], [6, "006_agent_answer_versions.sql"]] as const) {
         if (this.db.prepare("SELECT version FROM schema_migrations WHERE version = ?").get(version)) continue;
         this.db.exec(readFileSync(new URL(`../../migrations/${file}`, import.meta.url), "utf8"));
         this.db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)").run(version, new Date().toISOString());

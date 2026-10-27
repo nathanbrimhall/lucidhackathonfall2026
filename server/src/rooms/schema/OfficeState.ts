@@ -17,8 +17,15 @@ export const MeetingIndicator = schema({
   assistantStatus: t.string().default("none"),
 }, "MeetingIndicator");
 
+/** Generic status only. Agents never join the player or audio collections. */
+export const Agent = schema({
+  agentId: t.string(), x: t.float64(), y: t.float64(),
+  state: t.string().default("idle"), badge: t.string().default("AI"),
+  sponsorUserId: t.string().default(""),
+}, "Agent");
+
 export const OfficeState = schema({
   officeId: t.string(), protocolVersion: t.number().default(PROTOCOL_VERSION),
   mapId: t.string(), mapVersion: t.number(), serverTick: t.float64().default(0),
-  players: t.map(Player), meetings: t.map(MeetingIndicator),
+  players: t.map(Player), meetings: t.map(MeetingIndicator), agents: t.map(Agent),
 }, "OfficeState");

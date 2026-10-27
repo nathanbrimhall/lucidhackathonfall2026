@@ -5,7 +5,10 @@ import { joinOfficeSchema, playerInputSchema, playerStatusSchema, mediaPreferenc
 import { AuthError, type AuthService } from "../auth/AuthService.js";
 import { movePlayer, SIMULATION_INTERVAL_MS } from "../domain/movement.js";
 import { OfficeRegistry, SEAT_RESERVATION_SECONDS } from "./OfficeRegistry.js";
-import { MeetingIndicator, OfficeState, Player } from "./schema/OfficeState.js";
+import { Agent, MeetingIndicator, OfficeState, Player } from "./schema/OfficeState.js";
+import { AgentAvatarController } from "../services/AgentAvatarController.js";
+import type { AgentRunService } from "../services/AgentRunService.js";
+import type { CollaborationService } from "../services/CollaborationService.js";
 import { computeMeetingAudio, computeProximity, type ProximityParticipant } from "../domain/proximity.js";
 import { zoneAt } from "../domain/meeting-zones.js";
 import { Meetings, type MeetingChange } from "../domain/meetings.js";
@@ -19,7 +22,7 @@ export const RECONNECTION_SECONDS = 30;
 interface InputState { input?: PlayerInput; receivedAt: number; lastSeq: number; windowStart: number; count: number; rateErrorSent: boolean }
 export interface OfficeRoomOptions { reconnectionSeconds?: number; maxClients?: number }
 
-export function createOfficeRoom(auth: AuthService, officeId: string, registry: OfficeRegistry, map: OfficeMap, options: OfficeRoomOptions = {}, media?: LiveKitService, ai?: AISessionService, reminders?: ReminderService) {
+export function createOfficeRoom(auth: AuthService, officeId: string, registry: OfficeRegistry, map: OfficeMap, options: OfficeRoomOptions = {}, media?: LiveKitService, ai?: AISessionService, reminders?: ReminderService, agents?: AgentRunService, collaboration?: CollaborationService) {
   return class OfficeRoom extends Room<{ state: InstanceType<typeof OfficeState> }> {
     maxClients = options.maxClients ?? 20;
     autoDispose = false;
@@ -32,6 +35,7 @@ export function createOfficeRoom(auth: AuthService, officeId: string, registry: 
     private readonly mediaRemovals = new Set<Promise<void>>();
     private readonly meetings = new Meetings();
     private readonly aiMeetings = new Map<string,string>();
+    private readonly agentAvatar = new AgentAvatarController(map);
 
     static async onAuth(token: string, payload: unknown) {
       if (!joinOfficeSchema.safeParse(payload).success) throw new ServerError(400, "INVALID_INPUT");
@@ -47,6 +51,10 @@ export function createOfficeRoom(auth: AuthService, officeId: string, registry: 
       this.setPatchRate(50);
       this.setSimulationInterval((elapsedMs) => this.simulate(elapsedMs), SIMULATION_INTERVAL_MS);
       this.clock.setInterval(() => this.sendAudioPolicies(), 200);
+      if (agents) {
+        this.state.agents.set('office-agent', new Agent(this.agentAvatar.avatar));
+        this.clock.setInterval(() => this.updateAgent(), 1000);
+      }
       this.onMessage("reminder.ack", (client, payload) => {
         if (!this.consumeMessage(client)) return;
         const parsed = reminderAckSchema.safeParse(payload);
@@ -307,6 +315,11 @@ export function createOfficeRoom(auth: AuthService, officeId: string, registry: 
     }
     private simulate(elapsedMs: number) {
       this.state.serverTick++;
+      if (agents) {
+        this.agentAvatar.tick(elapsedMs);
+        const avatar = this.state.agents.get('office-agent');
+        if (avatar) Object.assign(avatar, this.agentAvatar.avatar);
+      }
       const now = performance.now();
       for (const [sessionId, state] of this.pendingInputs) {
         const player = this.state.players.get(sessionId);
@@ -319,6 +332,23 @@ export function createOfficeRoom(auth: AuthService, officeId: string, registry: 
         player.lastProcessedInputSeq = input.seq;
       }
       for (const sessionId of this.pendingInputs.keys()) this.updateZone(sessionId);
+    }
+    private updateAgent() {
+      if (!agents || this.stopping) return;
+      const recipient = agents.nextRecipient(officeId);
+      const target = [...this.state.players.values()].find(player => player.userId === recipient && player.connected);
+      this.agentAvatar.update(agents.publicStatus(officeId), target);
+      for (const client of this.clients) {
+        const player = this.state.players.get(client.sessionId);
+        if (!player?.connected || player.status !== 'available' || player.audioMode !== 'floor') continue;
+        try {
+          const who = this.authorize(client);
+          if (!collaboration?.profile(who).allowInterrupt) continue;
+          for (const request of agents.inbox(who)) {
+            if (agents.claimNotification(who,request.id)) client.send('agent.request',{requestId:request.id});
+          }
+        } catch { /* Revoked identities receive no private notice. */ }
+      }
     }
     private error(client: Client, code: ErrorCode, message: string) { client.send("request.error", { code, message }); }
   };
