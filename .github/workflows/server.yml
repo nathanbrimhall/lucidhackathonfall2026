@@ -37,9 +37,9 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
-      - run: npm run typecheck
-      - run: npm test
-      - run: npm run build
+      - run: npx playwright install --with-deps chromium
+      - name: Verify build, full test suite and integrated browsers without provider access
+        run: npm run office:verify
       - name: Verify offline AI regression fixtures (no provider credentials)
         run: npm run ai:eval
       - run: docker build --target worker-runtime -t lucid-ai-worker:ci .
@@ -48,7 +48,6 @@ jobs:
       - run: cp .env.example .env
       - run: docker compose up --build -d --wait --wait-timeout 120
       - run: npm run smoke
-      - run: npx playwright install --with-deps chromium
       - name: Confirm offline reminder before container replacement
         run: npm run smoke:reminders -- seed "$RUNNER_TEMP/reminder-smoke.json"
       - name: Replace application while retaining its data volume
