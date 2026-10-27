@@ -4,7 +4,7 @@ A virtual office where people can walk up to conversations. M2 adds authenticate
 
 ## Test the integrated office frontend
 
-From the repository root, run **npm run office:demo** and open **http://localhost:2568/**. Choose the fictional Nathan, Cameron and Maya accounts in separate windows to test the complete UI/backend flow. The demo seeds private notes and shared work in an isolated in-memory office; restarting resets fixtures without changing the normal database or resetting Gemini usage. Audio capture is disabled in this mode. AI submits only when you click Ask assistant and uses the configured Gemini key.
+From the repository root, run **npm ci** and **npm run setup:local** (first time only), then **npm run office:demo** and open **http://localhost:2568/**. Choose the fictional Nathan, Cameron and Maya accounts in separate windows to test the complete UI/backend flow. The demo seeds private notes and shared work in an isolated in-memory office; restarting resets fixtures without changing the normal database or resetting Gemini usage. Audio capture is disabled in this mode. AI submits only when you click Ask assistant and uses the configured Gemini key: set `AI_PROVIDER=gemini`, `GEMINI_API_KEY` and a 32+ character `AI_WORKER_SECRET` in `.env`. If Google returns a quota error, Ask stays paused until you run `npm run ai:usage -- --clear-pause`.
 
 Use **npm run office:dev** for the persistent office at **http://localhost:2567/** with your configured invite. Real audio additionally requires LiveKit; real AI capture requires AI_ENABLED=true and a worker (npm run office:dev -- --worker). OFFICE_LAYOUT=prototype matches the approved frontend artwork. No external Teams/Slack delivery or video calls are connected.
 
