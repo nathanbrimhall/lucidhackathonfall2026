@@ -43,6 +43,9 @@ async function moveRaw(user, x, y = 3) {
   }
   throw new Error('Could not reach target through keyboard movement');
 }
+// Proximity checks use legacy office offsets (A spawns at x=3 on the clear y=3 row); the prototype layout
+// replays them along its clear y=17.8 row, where A is placed at x=20.
+const move = (user, x, y = 3) => prototypeLayout ? moveRaw(user, x + 17, 17.8) : moveRaw(user, x, y);
 try {
   await until(async () => (await fetch(`${base}/media-harness/`)).ok, 'harness HTTP readiness', 120000);
   for (let index = 0; index < 3; index++) {
