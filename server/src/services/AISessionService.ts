@@ -155,7 +155,7 @@ export class AISessionService {
     if (!job) return null;
     const s=this.repo.get(job.aiSessionId)!;
     const base={id:job.id,leaseToken:job.leaseToken!,aiSessionId:s.aiSessionId,revision:job.revision};
-    if (job.kind==="summarize") return {...base,kind:"summarize",segments:this.repo.segments(s.aiSessionId),readers:s.readers};
+    if (job.kind==="summarize") return {...base,kind:"summarize",segments:this.repo.segments(s.aiSessionId),readers:s.readers,context:{participants:s.roster.filter(r=>s.readers.includes(r.userId)).map(r=>({userId:r.userId,displayName:r.displayName})),conversationStartedAt:new Date(s.startedAt??s.createdAt).toISOString(),timeZone:this.config.aiTimeZone}};
     const meeting=this.meetings.get(s.meetingSessionId);
     if (!meeting||s.status!=="capturing"||!s.roster.every(r=>r.consented)) { this.cancel(s,"failed","MEETING_ENDED"); return null; }
     const identity=`assistant_${randomUUID()}`,roomName=meeting.roomName;
@@ -204,7 +204,7 @@ export class AISessionService {
   }
   fail(id:string,lease:string,code:string) {
     const a=this.authorizedJob(id,lease); if(!a)return;
-    if(a.job.kind==="summarize"&&a.job.attempts<2) this.repo.finish(id,"pending"); else this.cancel(a.s,"failed",code);
+    if(!["QUOTA_EXCEEDED","QUOTA_PAUSED","LOCAL_BUDGET_EXCEEDED"].includes(code)&&a.job.kind==="summarize"&&a.job.attempts<2) this.repo.finish(id,"pending"); else this.cancel(a.s,"failed",code);
   }
   shutdown() { for(const s of this.repo.active()) this.cancel(s,"failed","SERVER_SHUTDOWN");this.meetings.clear(); this.deliveries.clear(); }
 }

@@ -25,7 +25,7 @@ HEALTHCHECK --interval=10s --timeout=3s --start-period=15s --retries=3 \
   CMD node -e "fetch('http://127.0.0.1:' + (process.env.PORT || 2567) + '/readyz').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
 CMD ["node", "dist/server/src/index.js"]
 
-# Separate process and image target; no microphone devices or persistent volume needed.
+# Separate process and image target; no microphone devices needed. A separate usage database tracks provider budgets.
 FROM server-runtime AS worker-runtime
 HEALTHCHECK NONE
 CMD ["node", "dist/worker/src/index.js"]

@@ -19,7 +19,12 @@
     "smoke": "tsx --env-file-if-exists=.env tools/smoke-client.ts",
     "smoke:media": "node --env-file-if-exists=.env tools/media-smoke.mjs",
     "smoke:ai-media": "tsx --env-file-if-exists=.env tools/ai-media-smoke.ts",
-    "smoke:reminders": "node --env-file-if-exists=.env tools/reminder-smoke.mjs"
+    "smoke:reminders": "node --env-file-if-exists=.env tools/reminder-smoke.mjs",
+    "ai:demo": "tsx --env-file-if-exists=.env tools/ai-demo/index.ts",
+    "ai:eval": "tsx --env-file-if-exists=.env tools/ai-eval/cli.ts",
+    "ai:verify": "tsx --env-file-if-exists=.env tools/ai-eval/verify.ts",
+    "ai:usage": "tsx --env-file-if-exists=.env tools/ai-eval/usage.ts",
+    "setup:local": "node scripts/setup-local.mjs"
   },
   "dependencies": {
     "@colyseus/core": "0.18.23",

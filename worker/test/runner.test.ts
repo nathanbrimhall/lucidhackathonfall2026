@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { WorkerApi } from "../src/client.js";
 import type { AudioCapture } from "../src/audio.js";
-import type { AiProviders } from "../src/providers.js";
+import { ProviderError, type AiProviders } from "../src/providers.js";
 import { runJob } from "../src/runner.js";
 import { captureJob, config, draft, summaryJob } from "./fixtures.js";
 
@@ -18,6 +18,13 @@ const chunk = { speakerUserId: "alice", startMs: 0, endMs: 1_000, wav: new Uint8
 afterEach(() => vi.useRealTimers());
 
 describe("leased job runner", () => {
+  it("reports quota failures distinctly so the server will not retry", async () => {
+    const deps = dependencies();
+    deps.providers.summarize.mockRejectedValue(new ProviderError("QUOTA_EXCEEDED", 429));
+    await expect(runJob(summaryJob, deps, new AbortController().signal)).rejects.toThrow("QUOTA_EXCEEDED");
+    expect(deps.api.fail).toHaveBeenCalledWith(summaryJob, "QUOTA_EXCEEDED");
+    expect(deps.api.complete).not.toHaveBeenCalled();
+  });
   it("checks authorization before a chunk reaches transcription", async () => {
     const deps = dependencies();
     deps.api.heartbeat.mockResolvedValueOnce({ active: true, finish: false }).mockResolvedValue({ active: false, finish: false });

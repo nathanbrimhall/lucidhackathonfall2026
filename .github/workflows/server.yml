@@ -40,6 +40,8 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+      - name: Verify offline AI regression fixtures (no provider credentials)
+        run: npm run ai:eval
       - run: docker build --target worker-runtime -t lucid-ai-worker:ci .
       - name: Verify worker native RTC runtime
         run: docker run --rm --entrypoint node lucid-ai-worker:ci --input-type=module -e 'const rtc = await import("@livekit/rtc-node"); const room = new rtc.Room(); await room.disconnect(); await rtc.dispose();'

@@ -1,0 +1,78 @@
+{
+  "fixtureId": "planning-handoff",
+  "model": "gemini-3.6-flash",
+  "promptVersion": "meeting-actions-v4",
+  "notes": {
+    "summary": [
+      {
+        "text": "Nathan and Cameron discussed focusing the hackathon demo on audio-only virtual office conversations, excluding video and Teams integration due to admin permission blockers.",
+        "segmentIds": [
+          "s1",
+          "s2",
+          "s7"
+        ]
+      },
+      {
+        "text": "They agreed on using a Slack-style message draft preview requiring human approval rather than sending actual messages.",
+        "segmentIds": [
+          "s8",
+          "s9"
+        ]
+      },
+      {
+        "text": "Cameron committed to updating the LiveKit transcript export, while Nathan committed to building the draft preview. A proposed new demo script was cancelled in favor of an existing recording.",
+        "segmentIds": [
+          "s4",
+          "s5",
+          "s10",
+          "s11",
+          "s12"
+        ]
+      }
+    ],
+    "decisions": [
+      {
+        "text": "Ship audio-only virtual office conversations for the demo, postponing video implementation.",
+        "segmentIds": [
+          "s1",
+          "s2"
+        ]
+      },
+      {
+        "text": "Use a Slack-style message draft preview requiring human approval without actually sending messages.",
+        "segmentIds": [
+          "s8",
+          "s9"
+        ]
+      },
+      {
+        "text": "Use the existing recording for the demo rather than creating a new script.",
+        "segmentIds": [
+          "s11",
+          "s12"
+        ]
+      }
+    ],
+    "actionItems": [
+      {
+        "text": "Add speaker IDs and timestamps to the LiveKit transcript export.",
+        "segmentIds": [
+          "s4"
+        ],
+        "ownerUserId": "cameron",
+        "dueAt": "2026-10-24T15:00:00-06:00"
+      },
+      {
+        "text": "Implement the message draft preview.",
+        "segmentIds": [
+          "s5"
+        ],
+        "ownerUserId": "nathan",
+        "dueAt": "2026-10-26T12:00:00-06:00"
+      }
+    ]
+  },
+  "expectedMissingFacts": [
+    "speaker-export-blocker"
+  ]
+}

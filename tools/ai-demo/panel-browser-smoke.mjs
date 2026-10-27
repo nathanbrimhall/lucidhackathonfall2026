@@ -1,0 +1,32 @@
+import { chromium } from 'playwright';
+import { createDemoApp } from './app.ts';
+import { referenceDependencies, referenceOverlap } from './coordination.ts';
+let providerCalls=0;
+const request=async(_url,init)=>{providerCalls++;const input=JSON.parse(JSON.parse(String(init.body)).contents[0].parts[0].text);return new Response(JSON.stringify({candidates:[{finishReason:'STOP',content:{parts:[{text:JSON.stringify(input.feature==='overlap'?referenceOverlap:referenceDependencies)}]}}]}));};
+const app=createDemoApp({env:{AI_PROVIDER:'gemini',GEMINI_API_KEY:'fictional-key',AI_WORKER_SECRET:'s'.repeat(32),AI_USAGE_DATABASE:':memory:'},request,reviewDatabase:':memory:',cooldownMs:0});
+const server=app.listen(0,'127.0.0.1');await new Promise(done=>server.once('listening',done));let browser;
+try{
+ browser=await chromium.launch({headless:true,executablePath:process.env.AI_BROWSER_EXECUTABLE??'C:/Program Files/Google/Chrome/Application/chrome.exe'});
+ const page=await browser.newPage();const errors=[];page.on('pageerror',error=>errors.push(error.message));let panelCalls=0;page.on('request',request=>{if(request.url().endsWith('/api/ai-panel')&&request.method()==='POST')panelCalls++;});
+ await page.goto(`http://127.0.0.1:${server.address().port}`);await page.locator('[data-task-id="speaker-export"]').waitFor({state:'attached'});
+ await page.getByRole('button',{name:'Dependency radar',exact:true}).click();await page.locator('#panel-prompt').fill('Which tasks are blocked on speaker identities?');
+ if(panelCalls||providerCalls)throw new Error('Inference ran before explicit submission');
+ await page.locator('#panel-submit').click();await page.locator('[data-finding="dependency"]').first().waitFor();
+ if(await page.locator('[data-finding="dependency"]').count()!==3)throw new Error('Missing dependency suggestions');
+ const exportCard=page.locator('[data-task-id="speaker-export"]');if(!(await exportCard.textContent()).includes('Coordination urgency: low'))throw new Error('Analysis mutated task priority');
+ await page.getByRole('button',{name:'Confirm all reviewed dependencies',exact:true}).click();await page.locator('#panel-status').filter({hasText:'Confirmed all reviewed dependencies'}).waitFor();
+ if(!(await exportCard.textContent()).includes('3 other people waiting'))throw new Error('Wrong unique person count');
+ await page.reload();await page.locator('[data-task-id="speaker-export"]').waitFor({state:'attached'});if(!(await exportCard.textContent()).includes('Coordination urgency: high'))throw new Error('Reviewed state lost on page reload');
+ await page.locator('#panel-undo').click();await page.locator('#panel-status').filter({hasText:'Undid:'}).waitFor();
+ if(!(await exportCard.textContent()).includes('Coordination urgency: low'))throw new Error('Undo failed');
+ await page.getByRole('button',{name:'Check overlap',exact:true}).click();await page.locator('#panel-submit').click();await page.locator('[data-finding="overlap"]').waitFor();
+ await page.getByRole('button',{name:'Confirm duplicate and link',exact:true}).click();await page.locator('#panel-status').filter({hasText:'Linked to existing task'}).waitFor();
+ if(!(await page.locator('[data-task-id="proposed-export"]').textContent()).includes('linked'))throw new Error('Duplicate not linked');
+ if(!(await page.locator('#panel-notifications').textContent()).includes('Quiet demo inbox for Cameron'))throw new Error('Missing owner notice');
+ await page.locator('#panel-undo').click();await page.locator('#panel-status').filter({hasText:'Undid:'}).waitFor();
+ await page.getByRole('button',{name:'Check overlap',exact:true}).click();await page.locator('#panel-submit').click();await page.locator('[data-finding="overlap"]').waitFor();await page.getByRole('button',{name:'Keep as separate task',exact:true}).click();await page.locator('#panel-status').filter({hasText:'Kept task separate'}).waitFor();
+ await page.locator('#panel-undo').click();await page.locator('#panel-status').filter({hasText:'Undid:'}).waitFor();
+ await page.getByRole('button',{name:'Dependency radar',exact:true}).click();await page.locator('#panel-mode').selectOption('live');await page.locator('#panel-submit').click();await page.locator('#panel-status').filter({hasText:'Gemini suggestions ready'}).waitFor();if(providerCalls!==1)throw new Error('Expected one mocked Gemini call');
+ await page.route('**/api/ai-panel',route=>route.abort());await page.locator('#panel-submit').click();await page.locator('#panel-status').filter({hasText:'Cannot reach the local server'}).waitFor();if(providerCalls!==1)throw new Error('Network failure triggered another provider call');
+ if(errors.length)throw new Error(errors.join(';'));console.log('AI panel browser passed: explicit invocation, dependency review, distinct people, overlap link/keep separate, owner notice, undo, reload, mocked live request and network failure. No live API calls.');
+}finally{await browser?.close();server.closeAllConnections();await new Promise(done=>server.close(done));app.locals.close();}

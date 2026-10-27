@@ -1,5 +1,15 @@
 {
   "extends": "./tsconfig.json",
-  "include": ["server/src/**/*.ts", "shared/src/**/*.ts", "worker/src/**/*.ts", "tools/ai-media-smoke.ts"],
-  "exclude": ["server/test", "worker/test"]
+  "include": [
+    "server/src/**/*.ts",
+    "shared/src/**/*.ts",
+    "worker/src/**/*.ts",
+    "tools/ai-media-smoke.ts",
+    "tools/ai-demo/**/*.ts",
+    "tools/ai-eval/**/*.ts"
+  ],
+  "exclude": [
+    "server/test",
+    "worker/test"
+  ]
 }

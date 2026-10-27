@@ -153,6 +153,12 @@ describe("M4 explicit requests and consent", () => {
 });
 
 describe("M4 private transcript and structured notes lifecycle", () => {
+  it("does not requeue a free-tier quota failure", async () => {
+    const { session, job } = await processing();
+    service.fail(job.id, job.leaseToken, "QUOTA_EXCEEDED");
+    expect(repo.get(session.aiSessionId)).toMatchObject({ status: "failed", error: "QUOTA_EXCEEDED" });
+    expect(await service.claim()).toBeNull();
+  });
   it.each(["capture", "processing"] as const)("withdrawal during %s deletes transcript and rejects late worker results", async phase => {
     const { session, job: captureJob } = await capture();
     service.segments(captureJob.id, captureJob.leaseToken, [segment()]);

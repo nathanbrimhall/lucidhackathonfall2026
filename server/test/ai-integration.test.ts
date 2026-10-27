@@ -130,6 +130,10 @@ describe("M4 authenticated worker HTTP and Colyseus meeting integration", () => 
     expect(await (await worker(`${capture.id}/heartbeat`, { leaseToken: capture.leaseToken })).json()).toMatchObject({ active: false });
     const summary = await claim() as AiSummaryJob;
     expect(summary.kind).toBe("summarize"); expect(summary.segments).toEqual([source]);
+    expect(summary.context?.participants.map(p => p.userId).sort()).toEqual([...summary.readers].sort());
+    expect(summary.context?.participants.every(p => Boolean(p.displayName))).toBe(true);
+    expect(Number.isFinite(Date.parse(summary.context!.conversationStartedAt))).toBe(true);
+    expect(summary.context?.timeZone).toBe("UTC");
     expect((await worker(`${summary.id}/complete`, { leaseToken: summary.leaseToken, notes: draft(outsider.guest.userId) })).status).toBe(400);
     expect((await worker(`${summary.id}/complete`, { leaseToken: summary.leaseToken, notes: draft(ada.guest.userId) })).status).toBe(200);
     await eventually(() => ada.ready.length === 1 && grace.ready.length === 1);

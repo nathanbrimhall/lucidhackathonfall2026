@@ -2,6 +2,13 @@
 
 A virtual office where people can walk up to conversations. M2 adds authenticated LiveKit microphone credentials, public-floor proximity audio, verified lifecycle webhooks, and a browser media harness to the shared office and authoritative movement from M1. M3 adds automatic private meeting-room audio. M4 adds opt-in AI meeting notes through a separate worker. M5 adds self-owned reminders with durable delivery and offline catch-up; real-device and second-host deployment checks remain manual acceptance work.
 
+## Start the AI transcript demo (no Docker required)
+
+From this repository, run `npm run ai:demo` and open http://127.0.0.1:8788/.
+Choose an offline reference replay or live Gemini extraction. The demo includes editable fictional transcripts and evidence-backed task drafts, with participant/time context and accuracy/latency/token metrics. `npm run ai:eval` runs offline fixtures; `npm run ai:eval -- --live --all` evaluates Gemini within free-tier safeguards.
+See [AI transcript demo and evaluation](docs/AI_TRANSCRIPT_DEMO.md) for configuration, test coverage, and scoring limitations. External message/task delivery and office microphone capture are separate from this transcript demo.
+The transcript demo also includes editable message drafts and task proposals with local approval, saved history, evidence, and approved-only JSON export. See [Message draft preview](docs/MESSAGE_DRAFT_PREVIEW.md). This stage adds no Gemini requests and does not send anything externally.
+
 ## Run with Docker Compose
 
 Install Docker with the Compose plugin, then prepare local settings:
@@ -16,7 +23,7 @@ Change the session secret, guest invite code, and LiveKit API secret before shar
 docker compose up --build
 ```
 
-AI notes are disabled by default. To enable them, set `AI_ENABLED=true`, replace `AI_WORKER_SECRET` with a random secret of at least 32 characters (distinct from both `SESSION_SECRET` and `LIVEKIT_API_SECRET`), and configure `OPENAI_API_KEY` or compatible provider credentials in `.env`. The same worker secret is shared with the optional worker; Compose supplies its internal `AI_SERVER_URL`. Start the AI worker profile with:
+AI notes are disabled by default. To enable them, set `AI_ENABLED=true`, replace `AI_WORKER_SECRET` with a random secret of at least 32 characters (distinct from both `SESSION_SECRET` and `LIVEKIT_API_SECRET`), and configure `AI_PROVIDER=gemini` and `GEMINI_API_KEY` (or explicitly select OpenAI with compatible model/base URL settings) in `.env`. The same worker secret is shared with the optional worker; Compose supplies its internal `AI_SERVER_URL`. Start the AI worker profile with:
 
 ```sh
 docker compose --profile ai up --build
@@ -223,3 +230,7 @@ Guests can create, edit, and cancel reminders for themselves through the media h
 `POST /api/reminders` creates a reminder with a UUID `requestId`, text, an explicit-offset UTC ISO `dueAt`, and valid IANA `timezone`; a note/action-item reference can be supplied as `source`. `GET /api/reminders` returns only the owner's `{ reminders, nextCursor }`, up to 100 per page; pass `?before=<nextCursor>` to reach older reminders. `PATCH /api/reminders/:id` edits or cancels with a UUID `requestId` and positive `revision`. A stale revision or request-key reuse for a different mutation returns `409 CONFLICT`. The full contract and demo checklist are in the [M5 runbook](docs/M5_REMINDERS_CHECK.md).
 
 CI exercises offline delivery, client deduplication, persisted acknowledgments, and reminder survival through server-container replacement on the same named volume. The registry-image example is [deploy/compose.images.yaml](deploy/compose.images.yaml); it accepts published images via `SERVER_IMAGE` and `WORKER_IMAGE`. A local backup restored into a new volume passed integrity and reminder recovery checks. A second-host deployment, trusted-TLS shared URL, and complete demo on separate physical machines are still pending manual acceptance. The runbook has an evidence record for those checks.
+
+Typed AI panel, dependency radar and overlap review: [AI_PANEL.md](docs/AI_PANEL.md).
+
+Decision questions, daily/catch-up briefs and meeting prep: [AI_KNOWLEDGE_TOOLS.md](docs/AI_KNOWLEDGE_TOOLS.md).

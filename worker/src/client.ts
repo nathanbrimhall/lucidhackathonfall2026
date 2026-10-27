@@ -6,7 +6,7 @@ export interface WorkerApi {
   heartbeat(job: AiWorkerJob, signal: AbortSignal): Promise<AiWorkerHeartbeat>;
   segments(job: AiWorkerJob, segments: AiTranscriptSegment[], signal: AbortSignal): Promise<void>;
   complete(job: AiWorkerJob, signal: AbortSignal, notes?: AiDraftNotes): Promise<void>;
-  fail(job: AiWorkerJob): Promise<void>;
+  fail(job: AiWorkerJob, code?: "WORKER_FAILED" | "QUOTA_EXCEEDED" | "QUOTA_PAUSED" | "LOCAL_BUDGET_EXCEEDED"): Promise<void>;
 }
 export function createWorkerApi(config: WorkerConfig, request: typeof fetch = fetch): WorkerApi {
   async function post(path: string, body: unknown, signal: AbortSignal): Promise<unknown> {
@@ -22,6 +22,6 @@ export function createWorkerApi(config: WorkerConfig, request: typeof fetch = fe
     async heartbeat(job, signal) { return aiWorkerHeartbeatSchema.parse(await post(`/${encodeURIComponent(job.id)}/heartbeat`, { leaseToken: job.leaseToken }, signal)); },
     async segments(job, segments, signal) { await post(`/${encodeURIComponent(job.id)}/segments`, { leaseToken: job.leaseToken, segments }, signal); },
     async complete(job, signal, notes) { await post(`/${encodeURIComponent(job.id)}/complete`, { leaseToken: job.leaseToken, ...(notes ? { notes } : {}) }, signal); },
-    async fail(job) { await post(`/${encodeURIComponent(job.id)}/fail`, { leaseToken: job.leaseToken, code: "WORKER_FAILED" }, AbortSignal.timeout(5_000)); },
+    async fail(job, code = "WORKER_FAILED") { await post(`/${encodeURIComponent(job.id)}/fail`, { leaseToken: job.leaseToken, code }, AbortSignal.timeout(5_000)); },
   };
 }

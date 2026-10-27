@@ -4,9 +4,10 @@ services:
   data-init:
     image: busybox:1.37.0
     user: "0:0"
-    command: ["sh", "-c", "mkdir -p /data && chown -R 1000:1000 /data"]
+    command: ["sh", "-c", "mkdir -p /data /usage && chown -R 1000:1000 /data /usage"]
     volumes:
       - office-data:/data
+      - office-ai-usage:/usage
     restart: "no"
 
   migrate:
@@ -17,6 +18,7 @@ services:
     environment:
       DATABASE_URL: /data/office.sqlite
       OPENAI_API_KEY: ""
+      GEMINI_API_KEY: ""
     command: ["node", "dist/server/src/migrate.js"]
     user: "1000:1000"
     volumes:
@@ -34,6 +36,7 @@ services:
     environment:
       DATABASE_URL: /data/office.sqlite
       OPENAI_API_KEY: ""
+      GEMINI_API_KEY: ""
     init: true
     ports:
       - "${PORT:-2567}:${PORT:-2567}"
@@ -57,13 +60,20 @@ services:
     environment:
       AI_SERVER_URL: http://server:${PORT:-2567}
       AI_WORKER_SECRET: "${AI_WORKER_SECRET:-}"
+      AI_PROVIDER: "${AI_PROVIDER:-gemini}"
+      AI_USAGE_DATABASE: /usage/ai-usage.sqlite
+      AI_LOCAL_DAILY_REQUEST_LIMIT: "${AI_LOCAL_DAILY_REQUEST_LIMIT:-20}"
+      AI_GEMINI_OUTPUT_MODE: "${AI_GEMINI_OUTPUT_MODE:-json}"
+      GEMINI_API_KEY: "${GEMINI_API_KEY:-}"
       OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
-      AI_PROVIDER_BASE_URL: "${AI_PROVIDER_BASE_URL:-https://api.openai.com/v1}"
-      AI_TRANSCRIPTION_MODEL: "${AI_TRANSCRIPTION_MODEL:-gpt-4o-mini-transcribe}"
-      AI_SUMMARY_MODEL: "${AI_SUMMARY_MODEL:-gpt-4o-mini}"
+      AI_PROVIDER_BASE_URL: "${AI_PROVIDER_BASE_URL:-}"
+      AI_TRANSCRIPTION_MODEL: "${AI_TRANSCRIPTION_MODEL:-}"
+      AI_SUMMARY_MODEL: "${AI_SUMMARY_MODEL:-}"
       AI_CHUNK_SECONDS: "${AI_CHUNK_SECONDS:-10}"
       AI_PROVIDER_TIMEOUT_MS: "${AI_PROVIDER_TIMEOUT_MS:-30000}"
       AI_MAX_TRANSCRIPT_CHARS: "${AI_MAX_TRANSCRIPT_CHARS:-100000}"
+    volumes:
+      - office-ai-usage:/usage
     init: true
     depends_on:
       server:
@@ -89,3 +99,4 @@ services:
 
 volumes:
   office-data:
+  office-ai-usage:

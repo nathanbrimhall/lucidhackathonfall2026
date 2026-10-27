@@ -1,9 +1,10 @@
+import { UsageLimitError } from "./usage.js";
 import { randomUUID } from "node:crypto";
 import type { AiWorkerJob } from "../../shared/src/ai-worker.js";
 import type { AudioCapture } from "./audio.js";
 import type { WorkerApi } from "./client.js";
 import type { WorkerConfig } from "./config.js";
-import type { AiProviders } from "./providers.js";
+import { ProviderError, type AiProviders } from "./providers.js";
 
 export interface JobDependencies { api: WorkerApi; capture: AudioCapture; providers: AiProviders; config: WorkerConfig }
 
@@ -64,7 +65,9 @@ export async function runJob(job: AiWorkerJob, deps: JobDependencies, shutdown: 
     }
   } catch (error) {
     if (!cancelled && !shutdown.aborted && !finishing) {
-      await deps.api.fail(job).catch(() => {});
+      if (error instanceof UsageLimitError) await deps.api.fail(job, error.code).catch(() => {});
+      else if (error instanceof ProviderError && error.code === "QUOTA_EXCEEDED") await deps.api.fail(job, "QUOTA_EXCEEDED").catch(() => {});
+      else await deps.api.fail(job).catch(() => {});
       throw failure ?? error;
     }
   } finally {
