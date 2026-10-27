@@ -1,0 +1,6 @@
+# CI overlay for compose.yaml: point LiveKit at a loopback-only config so a
+# browser on the runner can complete ICE. Paths resolve from the repo root.
+services:
+  livekit:
+    volumes: !override
+      - ./deploy/livekit.ci.yaml:/etc/livekit.yaml:ro
